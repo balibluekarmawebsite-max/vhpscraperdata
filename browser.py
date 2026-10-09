@@ -37,6 +37,11 @@ def make_driver(profile_dir, download_dir, headless=False):
     # Chrome component/auto updates off (belt-and-braces; also disable the
     # Google Update service at the OS level per README).
     opts.add_argument("--disable-component-update")
+    # Quiet the harmless GLES/EGL fallback noise from the old Intel GPU on
+    # Win7 so logs/run.log stays readable (software rendering is fine here).
+    opts.add_argument("--log-level=3")
+    opts.add_argument("--disable-gpu")
+    opts.add_experimental_option("excludeSwitches", ["enable-logging"])
 
     if headless:
         opts.add_argument("--headless=new")
