@@ -20,7 +20,7 @@ import sys
 import config
 from browser import make_driver
 from uploader import upload
-from vhp import LoginRequired, scrape_report
+from vhp import LoginRequired, ensure_logged_in, scrape_report
 
 VALID_CADENCES = ("daily", "weekly", "both")
 
@@ -91,6 +91,12 @@ def run_property(logger, prop, reports):
     driver = None
     try:
         driver = make_driver(prop["profile"], config.DOWNLOADS_DIR)
+
+        try:
+            ensure_logged_in(driver, prop, config.get_credentials(prop["code"]))
+        except LoginRequired as exc:
+            logger.error("[%s] login failed (%s) — set credentials.py", prop["code"], exc)
+            return 0, len(reports)
 
         for report in reports:
             tag = "{}/{}".format(prop["code"], report["name"])

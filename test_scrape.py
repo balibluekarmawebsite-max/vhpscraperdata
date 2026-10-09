@@ -16,7 +16,7 @@ import sys
 
 import config
 from browser import make_driver
-from vhp import LoginRequired, scrape_report
+from vhp import LoginRequired, ensure_logged_in, scrape_report
 
 
 def main(argv):
@@ -35,9 +35,20 @@ def main(argv):
             print("No report named {!r} in config.REPORTS".format(only_report))
             return 2
 
+    creds = config.get_credentials(code)
     driver = make_driver(prop["profile"], config.DOWNLOADS_DIR)
     ok = fail = 0
     try:
+        print("Logging in as {} ...".format(code))
+        try:
+            ensure_logged_in(driver, prop, creds)
+        except LoginRequired as exc:
+            print("LOGIN FAILED: {}".format(exc))
+            print("-> Create credentials.py (copy credentials.example.py) and put")
+            print("   {}'s VHP username + password in it, then re-run.".format(code))
+            return 1
+        print("Logged in OK.")
+
         for r in reports:
             print("--- scraping {} / {} ...".format(code, r["name"]))
             try:
@@ -45,7 +56,7 @@ def main(argv):
                 print("    SAVED -> {}".format(path))
                 ok += 1
             except LoginRequired:
-                print("    NOT logged in for {}. Run first:  python login.py {}".format(code, code))
+                print("    session dropped mid-run for {}".format(code))
                 fail += 1
                 break
             except Exception as exc:  # noqa: BLE001

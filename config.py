@@ -116,3 +116,24 @@ DOWNLOAD_TIMEOUT = 120
 ALERTS = {
     "slack_webhook": os.environ.get("VHP_SLACK_WEBHOOK", ""),
 }
+
+# ---------------------------------------------------------------------------
+# CREDENTIALS
+# ---------------------------------------------------------------------------
+# Per-property VHP logins. Create credentials.py (copy credentials.example.py)
+# and fill it in — it is git-ignored, so passwords never get committed.
+# Environment variables VHP_<CODE>_USER / VHP_<CODE>_PASS override the file.
+try:
+    from credentials import CREDENTIALS as _CREDS
+except Exception:  # file not created yet
+    _CREDS = {}
+
+
+def get_credentials(code):
+    """Return (username, password) for a property code, or None if unset."""
+    entry = _CREDS.get(code, {})
+    user = entry.get("username") or os.environ.get("VHP_{}_USER".format(code.upper()), "")
+    pwd = entry.get("password") or os.environ.get("VHP_{}_PASS".format(code.upper()), "")
+    if user and pwd:
+        return user, pwd
+    return None

@@ -18,6 +18,7 @@ import os
 import time
 
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -93,6 +94,93 @@ def is_logged_in(driver):
             if el.is_displayed():
                 return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# automatic login
+# ---------------------------------------------------------------------------
+_USER_SELECTORS = [
+    "input[data-cy='username-input-login']",
+    "input[type='email']",
+    "input[name='username']",
+    "input[name='user']",
+    "input[name='email']",
+    "input[type='text']",
+]
+_PASS_SELECTORS = [
+    "input[data-cy='password-input-login']",
+    "input[type='password']",
+    "input[name='password']",
+]
+_SUBMIT_SELECTORS = [
+    "button[data-cy='btn-submit']",
+    "button[type='submit']",
+    "button.q-btn[type='submit']",
+]
+
+
+def _first_visible(driver, selectors):
+    for sel in selectors:
+        for el in driver.find_elements(By.CSS_SELECTOR, sel):
+            try:
+                if el.is_displayed():
+                    return el
+            except Exception:  # noqa: BLE001 - stale element, keep looking
+                continue
+    return None
+
+
+def _login_form(driver):
+    """Return (username_el, password_el, submit_el_or_None) if a login form is
+    visible on screen, else None."""
+    pwd = _first_visible(driver, _PASS_SELECTORS)
+    if pwd is None:
+        return None
+    user = _first_visible(driver, _USER_SELECTORS)
+    submit = _first_visible(driver, _SUBMIT_SELECTORS)
+    return user, pwd, submit
+
+
+def ensure_logged_in(driver, prop, creds):
+    """Make sure this property is logged in, filling the login form if shown.
+
+    creds is (username, password) or None. Raises LoginRequired if a login form
+    is present but we have no usable credentials, or if login doesn't complete.
+    Logging in happens in the SAME browser we then scrape with, so it does not
+    depend on a session persisting between runs.
+    """
+    driver.get(prop["home_url"])
+    time.sleep(3)  # let the SPA render (login form or app)
+
+    form = _login_form(driver)
+    if form is None:
+        return  # already logged in — no form shown
+
+    user_el, pwd_el, submit_el = form
+    if not creds or user_el is None:
+        raise LoginRequired(
+            "login form shown for {} but no credentials set "
+            "(fill credentials.py)".format(prop["code"])
+        )
+
+    user_el.clear()
+    user_el.send_keys(creds[0])
+    pwd_el.clear()
+    pwd_el.send_keys(creds[1])
+    if submit_el is not None:
+        _safe_click(driver, submit_el)
+    else:
+        pwd_el.send_keys(Keys.RETURN)
+
+    # Wait for the login form to go away (login succeeded).
+    end = time.time() + 40
+    while time.time() < end:
+        if _login_form(driver) is None:
+            return
+        time.sleep(0.5)
+    raise LoginRequired(
+        "login did not complete for {} — check the username/password".format(prop["code"])
+    )
 
 
 # ---------------------------------------------------------------------------

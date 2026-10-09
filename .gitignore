@@ -12,8 +12,9 @@ logs/*
 chromedriver.exe
 chromedriver
 
-# Local secrets
+# Local secrets — VHP logins live here, NEVER committed.
 .env
+credentials.py
 
 # Python
 __pycache__/
