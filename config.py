@@ -38,23 +38,29 @@ PROPERTIES = [
     # All 3 properties use the SAME login page (https://e1-vhp.com/login) with
     # DIFFERENT accounts. Each property's own Chrome profile holds its saved
     # session, so the 3 logins never clash.
+    # `debug_port` = the remote-control port each property's Chrome window is
+    # opened on (by open-<code>.bat). The scraper attaches to that port and
+    # drives the window you already logged into. One port per property.
     {
         "code": "bkds",
         "name": "Blue Karma Dijiwa Seminyak",
         "profile": os.path.join(PROFILES_DIR, "bkds"),
         "home_url": "https://e1-vhp.com/login",
+        "debug_port": 9222,
     },
     {
         "code": "bkdu",
         "name": "Blue Karma Dijiwa Ubud",
         "profile": os.path.join(PROFILES_DIR, "bkdu"),
         "home_url": "https://e1-vhp.com/login",
+        "debug_port": 9223,
     },
     {
         "code": "bkv",
         "name": "Blue Karma Village",
         "profile": os.path.join(PROFILES_DIR, "bkv"),
         "home_url": "https://e1-vhp.com/login",
+        "debug_port": 9224,
     },
 ]
 

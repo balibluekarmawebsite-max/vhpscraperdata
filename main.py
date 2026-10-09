@@ -18,7 +18,7 @@ import os
 import sys
 
 import config
-from browser import make_driver
+from browser import kill_stale_chromedrivers, make_driver_attached
 from uploader import upload
 from vhp import LoginRequired, ensure_logged_in, scrape_report
 
@@ -88,15 +88,19 @@ def run_property(logger, prop, reports):
         logger.error("[%s] home_url is still a placeholder — skipping", prop["code"])
         return 0, len(reports)
 
-    driver = None
     try:
-        driver = make_driver(prop["profile"], config.DOWNLOADS_DIR)
+        driver = make_driver_attached(prop["debug_port"], config.DOWNLOADS_DIR)
+    except Exception as exc:  # noqa: BLE001 - window not open / not reachable
+        logger.error("[%s] cannot attach to its Chrome window on port %s "
+                     "(open it with open-%s.bat): %s",
+                     prop["code"], prop.get("debug_port"), prop["code"], exc)
+        return 0, len(reports)
 
+    try:
         try:
-            ensure_logged_in(driver, prop, config.get_credentials(prop["code"]),
-                             reports[0]["url"])
+            ensure_logged_in(driver, prop, None, reports[0]["url"])
         except LoginRequired as exc:
-            logger.error("[%s] login: %s", prop["code"], exc)
+            logger.error("[%s] %s", prop["code"], exc)
             return 0, len(reports)
 
         for report in reports:
@@ -108,8 +112,8 @@ def run_property(logger, prop, reports):
                 logger.info("[%s] uploaded (HTTP %s)", tag, status)
                 ok += 1
             except LoginRequired:
-                logger.error("re-login needed: %s — run `python login.py %s`",
-                             prop["code"], prop["code"])
+                logger.error("[%s] session dropped — log into its VHP window again",
+                             prop["code"])
                 fail = len(reports) - ok  # this + remaining reports can't run
                 break
             except Exception as exc:  # noqa: BLE001 - isolate per-report failures
@@ -118,12 +122,7 @@ def run_property(logger, prop, reports):
     except Exception as exc:  # noqa: BLE001 - isolate per-property failures
         fail += len(reports) - ok
         logger.exception("[%s] property-level failure: %s", prop["code"], exc)
-    finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:  # noqa: BLE001
-                pass
+    # No driver.quit() — leave the user's VHP window open for the next run.
 
     return ok, fail
 
@@ -146,6 +145,8 @@ def main(argv):
     if not reports:
         logger.info("no reports due for cadence=%s — nothing to do", args.cadence)
         return 0
+
+    kill_stale_chromedrivers()  # clear leftover drivers from previous runs
 
     total_ok = total_fail = 0
     for prop in config.PROPERTIES:

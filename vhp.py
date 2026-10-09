@@ -176,14 +176,17 @@ def ensure_logged_in(driver, prop, creds, probe_url):
 
     if _has_captcha(driver):
         raise LoginRequired(
-            "{code}: login needs a CAPTCHA — run `python login.py {code}`, log in "
-            "by hand once, then the saved session is reused.".format(code=prop["code"])
+            "{code}: the VHP window is not logged in — log into VHP by hand in the "
+            "'{code}' Chrome window (open it with open-{code}.bat), then re-run.".format(
+                code=prop["code"]
+            )
         )
 
     form = _login_form(driver)
     if not creds or form is None or form[0] is None:
         raise LoginRequired(
-            "{}: not logged in and no usable credentials/login form".format(prop["code"])
+            "{code}: the VHP window is not logged in — log into VHP by hand in the "
+            "'{code}' Chrome window, then re-run.".format(code=prop["code"])
         )
 
     user_el, pwd_el, submit_el = form

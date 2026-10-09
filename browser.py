@@ -69,3 +69,42 @@ def make_driver(profile_dir, download_dir, headless=False):
     driver = webdriver.Chrome(service=service, options=opts)
     driver.set_page_load_timeout(60)
     return driver
+
+
+def kill_stale_chromedrivers():
+    """Windows: end leftover chromedriver.exe from previous attached runs.
+    Does NOT touch chrome.exe, so the user's open VHP windows are untouched."""
+    if os.name == "nt":
+        os.system("taskkill /F /IM chromedriver.exe >nul 2>&1")
+
+
+def make_driver_attached(debug_port, download_dir):
+    """Attach to an ALREADY-RUNNING Chrome that the user opened with
+    --remote-debugging-port=<debug_port> (via open-<code>.bat) and logged into
+    VHP by hand. We drive that window; we never launch or log in ourselves, so
+    VHP sees a normal, human-logged-in browser (no CAPTCHA, no 'Not Allowed').
+
+    IMPORTANT: do NOT call driver.quit() on the result — that would close the
+    user's window. The caller just stops using it and leaves it open.
+    """
+    if not os.path.exists(config.CHROMEDRIVER_PATH):
+        raise FileNotFoundError(
+            "ChromeDriver not found at {}".format(config.CHROMEDRIVER_PATH)
+        )
+    opts = Options()
+    opts.add_experimental_option("debuggerAddress", "127.0.0.1:{}".format(int(debug_port)))
+
+    service = Service(executable_path=config.CHROMEDRIVER_PATH)
+    driver = webdriver.Chrome(service=service, options=opts)
+    driver.set_page_load_timeout(60)
+
+    # Send downloads to our folder for this session (the window's own default
+    # download dir is left unchanged).
+    os.makedirs(download_dir, exist_ok=True)
+    for cmd in ("Page.setDownloadBehavior", "Browser.setDownloadBehavior"):
+        try:
+            driver.execute_cdp_cmd(cmd, {"behavior": "allow", "downloadPath": download_dir})
+            break
+        except Exception:  # noqa: BLE001 - try the next CDP command name
+            continue
+    return driver

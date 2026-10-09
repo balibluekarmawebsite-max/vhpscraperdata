@@ -1,21 +1,22 @@
 """
 test_scrape.py — quick manual test of the SCRAPE only (no dashboard upload).
 
-Logs into VHP using a property's saved profile, pulls its report(s) via
-"Print CSV", and tells you where each CSV landed. Use this to confirm the
-scraping works before wiring up the upload.
+Attaches to the Chrome window you opened for a property (with open-<code>.bat)
+and already logged into, pulls its report(s) via "Print CSV", and tells you
+where each CSV landed.
+
+BEFORE running:
+    1. Open the property's window:   open-bkv.bat
+    2. Log into VHP in that window (solve the CAPTCHA), leave it open.
 
 Usage:
     C:\\Python38\\python.exe test_scrape.py bkv
     C:\\Python38\\python.exe test_scrape.py bkv yearly-forecast-of-room-occupancy
-
-First arg  = property code (bkds / bkdu / bkv), defaults to bkv.
-Second arg = a single report name (optional); default = all reports in config.
 """
 import sys
 
 import config
-from browser import make_driver
+from browser import kill_stale_chromedrivers, make_driver_attached
 from vhp import LoginRequired, ensure_logged_in, scrape_report
 
 
@@ -35,17 +36,25 @@ def main(argv):
             print("No report named {!r} in config.REPORTS".format(only_report))
             return 2
 
-    creds = config.get_credentials(code)
-    driver = make_driver(prop["profile"], config.DOWNLOADS_DIR)
+    kill_stale_chromedrivers()
+    try:
+        driver = make_driver_attached(prop["debug_port"], config.DOWNLOADS_DIR)
+    except Exception as exc:  # noqa: BLE001
+        print("Could not attach to the {} Chrome window on port {}.".format(
+            code, prop["debug_port"]))
+        print("-> First run  open-{}.bat  and log into VHP in that window.".format(code))
+        print("   ({})".format(exc))
+        return 1
+
     ok = fail = 0
     try:
-        print("Logging in as {} ...".format(code))
         try:
-            ensure_logged_in(driver, prop, creds, reports[0]["url"])
+            # creds=None: we never auto-login here; you logged in by hand.
+            ensure_logged_in(driver, prop, None, reports[0]["url"])
         except LoginRequired as exc:
-            print("LOGIN FAILED: {}".format(exc))
+            print("NOT LOGGED IN: {}".format(exc))
             return 1
-        print("Logged in OK.")
+        print("Attached to your logged-in {} window OK.".format(code))
 
         for r in reports:
             print("--- scraping {} / {} ...".format(code, r["name"]))
@@ -61,10 +70,8 @@ def main(argv):
                 fail += 1
                 print("    FAILED: {}".format(exc))
     finally:
-        try:
-            driver.quit()
-        except Exception:  # noqa: BLE001
-            pass
+        # Do NOT quit — that would close your VHP window. Just stop driving it.
+        pass
 
     print("\nDone: {} ok, {} failed.".format(ok, fail))
     return 0 if fail == 0 else 1
