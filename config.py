@@ -35,23 +35,26 @@ CHROMEDRIVER_PATH = os.path.join(
 # accounts), see README section "Login model" — you'd use a single profile and
 # a "select property" step instead of three profiles.
 PROPERTIES = [
+    # All 3 properties use the SAME login page (https://e1-vhp.com/login) with
+    # DIFFERENT accounts. Each property's own Chrome profile holds its saved
+    # session, so the 3 logins never clash.
     {
         "code": "bkds",
         "name": "Blue Karma Dijiwa Seminyak",
         "profile": os.path.join(PROFILES_DIR, "bkds"),
-        "home_url": "PASTE-BKDS-VHP-URL",
+        "home_url": "https://e1-vhp.com/login",
     },
     {
         "code": "bkdu",
         "name": "Blue Karma Dijiwa Ubud",
         "profile": os.path.join(PROFILES_DIR, "bkdu"),
-        "home_url": "PASTE-BKDU-VHP-URL",
+        "home_url": "https://e1-vhp.com/login",
     },
     {
         "code": "bkv",
         "name": "Blue Karma Village",
         "profile": os.path.join(PROFILES_DIR, "bkv"),
-        "home_url": "PASTE-BKV-VHP-URL",
+        "home_url": "https://e1-vhp.com/login",
     },
 ]
 
@@ -59,31 +62,31 @@ PROPERTIES = [
 # REPORTS
 # ---------------------------------------------------------------------------
 # Defined ONCE and reused for every property (same VHP UI across properties).
+# Every report is pulled the same way (handled in vhp.py):
+#   open the URL -> set the period -> click SEARCH -> Print -> "Print CSV"
+#   -> the CSV downloads -> we rename + upload it.
 #
 # Fields:
-#   name          : short slug used in the saved filename and upload tag.
-#   cadence       : "daily", "weekly", or "both" — controls which run picks it up.
-#   url           : deep-link to the report if VHP has one; else None -> use
-#                   the recorded navigation clicks in vhp.py.
-#   export_label  : visible text of the export/download button to click.
-#   date_range    : how far back to pull. "yesterday" | "last_7_days" | None.
-#                   (Interpreted in vhp.py::set_date_range — adapt to your UI.)
-#
-# TODO: replace these two examples with the exact reports you need.
+#   name     : report slug. Matches the VHP page URL AND the CSV filename VHP
+#              produces, and is used in our saved filename + upload tag.
+#   cadence  : "daily", "weekly", "monthly", or "both" — which run picks it up.
+#   url      : deep-link to the report page.
+#   period   : how to set the date filter before searching (handled in vhp.py):
+#                "current_month" -> set the Month box to this month
+#                "last_7_days"   -> set the Date range to the previous 7 days
+#                None            -> leave VHP's default, just press SEARCH
 REPORTS = [
     {
-        "name": "daily-revenue",
-        "cadence": "daily",
-        "url": None,
-        "export_label": "Export",
-        "date_range": "yesterday",
+        "name": "yearly-forecast-of-room-occupancy",
+        "cadence": "weekly",   # TODO confirm: daily / weekly / monthly
+        "url": "https://e1-vhp.com/fr/report/yearly-forecast-of-room-occupancy",
+        "period": "current_month",
     },
     {
-        "name": "weekly-market-segment",
+        "name": "reservation-by-creation-date",
         "cadence": "weekly",
-        "url": None,
-        "export_label": "Export",
-        "date_range": "last_7_days",
+        "url": "https://e1-vhp.com/fr/reservation-by-creation-date",
+        "period": "last_7_days",
     },
 ]
 
@@ -103,9 +106,8 @@ UPLOAD = {
     "timeout": 120,
 }
 
-# Export file extension VHP produces (used when renaming the download).
-# "xlsx" or "csv".
-EXPORT_EXT = "xlsx"
+# Export file extension VHP's "Print CSV" produces (used when renaming).
+EXPORT_EXT = "csv"
 
 # How long to wait (seconds) for a download to finish before giving up.
 DOWNLOAD_TIMEOUT = 120
