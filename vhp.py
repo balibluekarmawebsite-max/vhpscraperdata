@@ -265,15 +265,42 @@ def wait_for_report_data(driver, timeout=60):
 
 
 def export_print_csv(driver):
-    """Open the printer menu and click 'Print CSV' to trigger the download."""
+    """Open the printer menu and click 'Print CSV' to start the download.
+
+    Clicks the toolbar icon buttons (printer is the right-most) until a menu
+    containing 'Print CSV' appears, then clicks it. Robust to not knowing
+    exactly which icon is the printer.
+    """
     buttons = _toolbar_buttons(driver)
     if not buttons:
-        raise RuntimeError("report toolbar (refresh/print icons) not found")
-    _safe_click(driver, buttons[-1])  # printer is the right-most toolbar icon
-    item = WebDriverWait(driver, 15).until(
-        EC.element_to_be_clickable((By.XPATH, PRINT_CSV_ITEM))
+        raise RuntimeError("print/refresh toolbar not found above the table")
+    last_err = None
+    for btn in reversed(buttons):  # printer is the right-most icon; try it first
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            btn.click()
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            continue
+        time.sleep(0.9)  # let the menu animate in
+        items = [el for el in driver.find_elements(By.XPATH, PRINT_CSV_ITEM) if el.is_displayed()]
+        if items:
+            _safe_click(driver, items[0])
+            return
+        try:  # close the menu we opened before trying the next button
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.3)
+    raise RuntimeError(
+        "'Print CSV' not found after clicking the toolbar ({} button(s) tried){}".format(
+            len(buttons),
+            "" if last_err is None else "; last click error: {}".format(last_err),
+        )
     )
-    _safe_click(driver, item)
 
 
 # ---------------------------------------------------------------------------
@@ -329,16 +356,32 @@ def rename_download(src, prop_code, report_name, folder):
 # ---------------------------------------------------------------------------
 # orchestration for one report
 # ---------------------------------------------------------------------------
+def _describe(exc):
+    """One-line, readable description of an exception for logs."""
+    first = (str(exc).strip().splitlines() or [""])[0]
+    return "{}: {}".format(type(exc).__name__, first or "(no details)")
+
+
 def scrape_report(driver, prop, report, download_dir):
     """Run the full flow for one report; return the saved CSV path.
 
-    Raises on failure so main.py can log it and carry on with the next report.
+    Each step names itself in any error (so a failure reads like
+    "[export Print CSV] TimeoutException: ...") and main.py/test_scrape.py can
+    log it and carry on with the next report.
     """
-    open_report(driver, report)
-    set_period(driver, report)
-    click_search(driver)
-    wait_for_report_data(driver)
+    def step(name, fn):
+        try:
+            return fn()
+        except LoginRequired:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("[{}] {}".format(name, _describe(exc)))
+
+    step("open report", lambda: open_report(driver, report))
+    step("set period", lambda: set_period(driver, report))
+    step("click SEARCH", lambda: click_search(driver))
+    step("wait for data", lambda: wait_for_report_data(driver))
     time.sleep(1)  # let the grid settle before exporting
-    export_print_csv(driver)
-    raw = wait_for_download(download_dir)
+    step("export Print CSV", lambda: export_print_csv(driver))
+    raw = step("wait for download", lambda: wait_for_download(download_dir))
     return rename_download(raw, prop["code"], report["name"], download_dir)
