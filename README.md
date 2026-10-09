@@ -60,6 +60,10 @@ they hold logins, PMS data, and a per-machine binary.
 
 ## One-time setup on the Windows 7 PC
 
+> 📘 **New to this? Follow [`SETUP-WINDOWS.md`](SETUP-WINDOWS.md)** — a detailed,
+> click-by-click beginner's guide with exact download links and a check after
+> every step. The list below is the quick summary.
+
 1. **Install Python 3.8.10** (64-bit) to `C:\Python38`. Tick "Add to PATH" or
    use the full path in `run.bat`.
 2. **Install Google Chrome 109** (the last Win7 build). Then **disable
