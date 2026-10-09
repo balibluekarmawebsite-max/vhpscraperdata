@@ -1,0 +1,8 @@
+# Pinned for Windows 7 SP1 + Python 3.8.10. Do NOT "update to latest" —
+# newer releases drop Win7 / Py3.8 support. See README "Hard constraints".
+selenium==4.9.1
+requests==2.31.0
+
+# Optional — only for the direct-Postgres fallback path (not used by default):
+# psycopg2-binary==2.9.9
+# openpyxl==3.1.2

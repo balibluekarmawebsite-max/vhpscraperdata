@@ -1,0 +1,31 @@
+# --- Sensitive / machine-local: never commit contents (keep the folders) ---
+# Login sessions & cookies live here — committing them would leak VHP access.
+profiles/*
+!profiles/.gitkeep
+# Downloaded report files (PMS data) and run logs stay on the PC.
+downloads/*
+!downloads/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# ChromeDriver binary is downloaded per-machine (v109), not version-controlled.
+chromedriver.exe
+chromedriver
+
+# Local secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# OS / editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/
