@@ -20,7 +20,7 @@ import sys
 import config
 from browser import make_driver
 from uploader import upload
-from vhp import is_logged_in, scrape_report
+from vhp import LoginRequired, scrape_report
 
 VALID_CADENCES = ("daily", "weekly", "both")
 
@@ -91,12 +91,6 @@ def run_property(logger, prop, reports):
     driver = None
     try:
         driver = make_driver(prop["profile"], config.DOWNLOADS_DIR)
-        driver.get(prop["home_url"])
-
-        if not is_logged_in(driver):
-            logger.error("re-login needed: %s — run `python login.py %s`",
-                         prop["code"], prop["code"])
-            return 0, len(reports)
 
         for report in reports:
             tag = "{}/{}".format(prop["code"], report["name"])
@@ -106,6 +100,11 @@ def run_property(logger, prop, reports):
                 status = upload(path, prop["code"], report["name"])
                 logger.info("[%s] uploaded (HTTP %s)", tag, status)
                 ok += 1
+            except LoginRequired:
+                logger.error("re-login needed: %s — run `python login.py %s`",
+                             prop["code"], prop["code"])
+                fail = len(reports) - ok  # this + remaining reports can't run
+                break
             except Exception as exc:  # noqa: BLE001 - isolate per-report failures
                 fail += 1
                 logger.exception("[%s] FAILED: %s", tag, exc)

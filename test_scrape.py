@@ -16,7 +16,7 @@ import sys
 
 import config
 from browser import make_driver
-from vhp import is_logged_in, scrape_report
+from vhp import LoginRequired, scrape_report
 
 
 def main(argv):
@@ -38,17 +38,16 @@ def main(argv):
     driver = make_driver(prop["profile"], config.DOWNLOADS_DIR)
     ok = fail = 0
     try:
-        driver.get(prop["home_url"])
-        if not is_logged_in(driver):
-            print("NOT logged in for {}. Run first:  python login.py {}".format(code, code))
-            return 1
-
         for r in reports:
             print("--- scraping {} / {} ...".format(code, r["name"]))
             try:
                 path = scrape_report(driver, prop, r, config.DOWNLOADS_DIR)
                 print("    SAVED -> {}".format(path))
                 ok += 1
+            except LoginRequired:
+                print("    NOT logged in for {}. Run first:  python login.py {}".format(code, code))
+                fail += 1
+                break
             except Exception as exc:  # noqa: BLE001
                 fail += 1
                 print("    FAILED: {}".format(exc))

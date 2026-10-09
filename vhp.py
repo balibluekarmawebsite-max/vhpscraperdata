@@ -23,6 +23,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 import config
 
+
+class LoginRequired(Exception):
+    """Raised when VHP shows the login form instead of the report (the saved
+    session has expired / this property is not logged in)."""
+
+
 # --- Locators (built from the live DOM; Quasar "q-" classes) ----------------
 
 # A to-Z translate pair makes text matches case-insensitive in XPath 1.0.
@@ -93,11 +99,24 @@ def is_logged_in(driver):
 # per-report steps
 # ---------------------------------------------------------------------------
 def open_report(driver, report):
-    """Deep-link to the report and wait for the filter panel to render."""
+    """Deep-link to the report and wait for it to render.
+
+    Detects login state at the REAL report page (not the /login route, which
+    always shows a form): if the SEARCH button appears we're in; if a login
+    field appears we were bounced to login -> raise LoginRequired.
+    """
     driver.get(report["url"])
-    WebDriverWait(driver, 40).until(
-        EC.presence_of_element_located((By.XPATH, SEARCH_BTN))
-    )
+    end = time.time() + 40
+    while time.time() < end:
+        if driver.find_elements(By.XPATH, SEARCH_BTN):
+            return  # report rendered -> logged in
+        for sel in _LOGIN_FIELDS:
+            if any(e.is_displayed() for e in driver.find_elements(By.CSS_SELECTOR, sel)):
+                raise LoginRequired(
+                    "bounced to login on report {!r}".format(report["name"])
+                )
+        time.sleep(0.5)
+    raise TimeoutError("report page did not render: {}".format(report["url"]))
 
 
 def set_period(driver, report):
