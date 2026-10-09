@@ -78,7 +78,7 @@ PROPERTIES = [
 REPORTS = [
     {
         "name": "yearly-forecast-of-room-occupancy",
-        "cadence": "weekly",   # TODO confirm: daily / weekly / monthly
+        "cadence": "daily",   # change to "weekly"/"both" here anytime
         "url": "https://e1-vhp.com/fr/report/yearly-forecast-of-room-occupancy",
         "period": "current_month",
     },

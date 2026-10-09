@@ -1,127 +1,154 @@
 """
-vhp.py — navigate to a report, set the date range, export, wait for the
-download, and rename the file.
+vhp.py — drive one e1-vhp.com report and capture its CSV.
 
-HOW TO FILL THIS IN
--------------------
-VHP's exact buttons/links differ per install, so the navigation and date-range
-steps below are TEMPLATES with TODO markers. Record your clicks with the
-Selenium IDE browser extension (or UI.Vision), then translate them here.
+Flow per report (same for every report — all use VHP's built-in "Print CSV"):
+    open the report URL
+      -> (use VHP's default period)         set_period()
+      -> click the blue SEARCH button        click_search()
+      -> wait for the data grid to populate   wait_for_report_data()
+      -> click the printer icon -> "Print CSV"  export_print_csv()
+      -> Chrome downloads a .csv              wait_for_download()
+      -> rename it <code>-<report>-<date>.csv rename_download()
 
-Prefer STABLE locators — visible link text / button labels (By.LINK_TEXT,
-By.PARTIAL_LINK_TEXT, By.XPATH on text()) — over brittle auto-generated
-absolute XPaths, which are the usual reason an automation silently breaks.
+e1-vhp.com is a Vue/Quasar single-page app, so report data loads asynchronously
+after SEARCH — every step waits explicitly rather than assuming instant render.
 """
 import datetime
 import os
 import time
 
-from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 import config
 
+# --- Locators (built from the live DOM; Quasar "q-" classes) ----------------
+
+# A to-Z translate pair makes text matches case-insensitive in XPath 1.0.
+_LOWER = "abcdefghijklmnopqrstuvwxyz"
+_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _ci(expr):
+    """Wrap an XPath string expression so it compares upper-cased."""
+    return "translate(normalize-space({}),'{}','{}')".format(expr, _LOWER, _UPPER)
+
+
+# The blue "SEARCH" button in the left filter panel (has visible text).
+SEARCH_BTN = "//button[contains({}, 'SEARCH')]".format(_ci("."))
+
+# The "Print CSV" entry in the menu opened by the printer icon.
+PRINT_CSV_ITEM = (
+    "//*[contains(@class,'q-item')][contains({ci}, 'PRINT CSV')]"
+    " | //*[{ci_text} = 'PRINT CSV']"
+).format(
+    ci=_ci("."),
+    ci_text="translate(normalize-space(text()),'{}','{}')".format(_LOWER, _UPPER),
+)
+
+# A login password field = we are NOT logged in.
+_LOGIN_FIELDS = [
+    "input[type='password']",
+    "input[data-cy='password-input-login']",
+    "input[data-cy='username-input-login']",
+]
+
 
 # ---------------------------------------------------------------------------
-# Login detection
+# small helpers
+# ---------------------------------------------------------------------------
+def _safe_click(driver, el):
+    """Click, falling back to a JS click if the normal one is intercepted."""
+    try:
+        el.click()
+    except Exception:  # noqa: BLE001
+        driver.execute_script("arguments[0].click();", el)
+
+
+def _toolbar_buttons(driver):
+    """The round icon buttons (refresh, print) that sit just above the report
+    table. In document order the printer is the LAST one before the table."""
+    return driver.find_elements(
+        By.XPATH,
+        "(//div[contains(@class,'q-table__container')])[1]"
+        "/preceding::button[contains(@class,'q-btn--round')]",
+    )
+
+
+# ---------------------------------------------------------------------------
+# login detection
 # ---------------------------------------------------------------------------
 def is_logged_in(driver):
-    """Heuristic: if a password field is visible, we're on a login screen.
-
-    Adapt the locator if VHP's login page uses something other than a plain
-    <input type="password">.
-    """
-    pwd_fields = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
-    return not any(f.is_displayed() for f in pwd_fields)
+    """True unless a visible login field is on screen."""
+    time.sleep(1)  # let the SPA settle after navigation
+    for sel in _LOGIN_FIELDS:
+        for el in driver.find_elements(By.CSS_SELECTOR, sel):
+            if el.is_displayed():
+                return False
+    return True
 
 
 # ---------------------------------------------------------------------------
-# Navigation to a report
+# per-report steps
 # ---------------------------------------------------------------------------
-def open_report(driver, prop, report):
-    """Open a report page: deep-link if the report has a URL, else click
-    through the menus.
-
-    TODO: replace the click-through branch with your recorded navigation.
-    """
-    if report.get("url"):
-        driver.get(report["url"])
-        return
-
-    # --- recorded navigation (EXAMPLE — replace with your real clicks) ---
-    # e.g. Reports menu -> the specific report link, matched by visible text.
-    wait = WebDriverWait(driver, 30)
-    # wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "Reports"))).click()
-    # wait.until(
-    #     EC.element_to_be_clickable((By.PARTIAL_LINK_TEXT, report["name"]))
-    # ).click()
-    raise NotImplementedError(
-        "Navigation for report '{}' is not recorded yet. Either set its 'url' "
-        "in config.py or fill in open_report() in vhp.py.".format(report["name"])
+def open_report(driver, report):
+    """Deep-link to the report and wait for the filter panel to render."""
+    driver.get(report["url"])
+    WebDriverWait(driver, 40).until(
+        EC.presence_of_element_located((By.XPATH, SEARCH_BTN))
     )
 
 
-# ---------------------------------------------------------------------------
-# Date range
-# ---------------------------------------------------------------------------
-def set_date_range(driver, report):
-    """Set the report's date range before exporting.
+def set_period(driver, report):
+    """Set the report's date filter before searching.
 
-    date_range values are interpreted here; adapt to how VHP's UI accepts
-    dates (typed field, date-picker, or URL param).
-
-    TODO: implement against your VHP date controls.
+    v1 uses VHP's DEFAULT period, which already matches a daily/weekly run:
+      * "current_month" reports (e.g. the forecast) open on the current month.
+      * "last_7_days" reports (e.g. reservations) open on the recent window.
+    Setting an exact custom range (typing into VHP's Month / Date controls) is a
+    planned refinement; it needs per-report field locators. For now we leave the
+    default and just press SEARCH.  (report["period"] documents the intent.)
     """
-    kind = report.get("date_range")
-    if not kind:
-        return
-
-    today = datetime.date.today()
-    if kind == "yesterday":
-        start = end = today - datetime.timedelta(days=1)
-    elif kind == "last_7_days":
-        end = today - datetime.timedelta(days=1)
-        start = end - datetime.timedelta(days=6)
-    else:
-        # Unknown token — leave the UI at its default and let the caller log it.
-        return
-
-    _ = (start, end)  # noqa: F841  (wire these into the date fields below)
-    # EXAMPLE (replace locators/format with your UI):
-    # fmt = "%Y-%m-%d"
-    # from_field = driver.find_element(By.ID, "dateFrom")
-    # from_field.clear(); from_field.send_keys(start.strftime(fmt))
-    # to_field = driver.find_element(By.ID, "dateTo")
-    # to_field.clear(); to_field.send_keys(end.strftime(fmt))
+    return
 
 
-# ---------------------------------------------------------------------------
-# Export
-# ---------------------------------------------------------------------------
-def click_export(driver, report):
-    """Click the export/download button, matched by its visible label."""
-    label = report.get("export_label", "Export")
-    wait = WebDriverWait(driver, 30)
-    btn = wait.until(
-        EC.element_to_be_clickable(
-            (By.XPATH, "//*[self::button or self::a][contains(normalize-space(.), "
-                       "{!r})]".format(label))
-        )
+def click_search(driver):
+    btn = WebDriverWait(driver, 30).until(
+        EC.element_to_be_clickable((By.XPATH, SEARCH_BTN))
     )
-    btn.click()
+    _safe_click(driver, btn)
+
+
+def wait_for_report_data(driver, timeout=60):
+    """Wait until the Quasar table has real cells (data loaded via XHR)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        cells = driver.find_elements(By.CSS_SELECTOR, "table.q-table td")
+        if sum(1 for c in cells if c.text.strip()) >= 3:
+            return
+        time.sleep(1)
+    raise TimeoutError("report data did not load after SEARCH")
+
+
+def export_print_csv(driver):
+    """Open the printer menu and click 'Print CSV' to trigger the download."""
+    buttons = _toolbar_buttons(driver)
+    if not buttons:
+        raise RuntimeError("report toolbar (refresh/print icons) not found")
+    _safe_click(driver, buttons[-1])  # printer is the right-most toolbar icon
+    item = WebDriverWait(driver, 15).until(
+        EC.element_to_be_clickable((By.XPATH, PRINT_CSV_ITEM))
+    )
+    _safe_click(driver, item)
 
 
 # ---------------------------------------------------------------------------
-# Wait for download
+# download capture
 # ---------------------------------------------------------------------------
 def wait_for_download(folder, timeout=None):
-    """Return the path of the newly downloaded file.
-
-    Chrome writes a `.crdownload` temp file until the download finishes, so we
-    wait for a new, non-.crdownload file to appear in `folder`.
-    """
+    """Return the path of the newly downloaded file (Chrome writes a temporary
+    .crdownload until the download finishes)."""
     if timeout is None:
         timeout = config.DOWNLOAD_TIMEOUT
     os.makedirs(folder, exist_ok=True)
@@ -135,7 +162,6 @@ def wait_for_download(folder, timeout=None):
             if not f.endswith(".crdownload") and not f.endswith(".tmp")
         ]
         if done:
-            # Newest, in case several appeared.
             done.sort(
                 key=lambda f: os.path.getmtime(os.path.join(folder, f)),
                 reverse=True,
@@ -146,7 +172,6 @@ def wait_for_download(folder, timeout=None):
 
 
 def _unique(path):
-    """If path exists, append -1, -2, ... before the extension."""
     if not os.path.exists(path):
         return path
     root, ext = os.path.splitext(path)
@@ -169,15 +194,18 @@ def rename_download(src, prop_code, report_name, folder):
 
 
 # ---------------------------------------------------------------------------
-# Orchestration for one report
+# orchestration for one report
 # ---------------------------------------------------------------------------
 def scrape_report(driver, prop, report, download_dir):
-    """Run the full flow for one report and return the saved file path.
+    """Run the full flow for one report; return the saved CSV path.
 
-    Raises on failure so the caller (main.py) can log and continue.
+    Raises on failure so main.py can log it and carry on with the next report.
     """
-    open_report(driver, prop, report)
-    set_date_range(driver, report)
-    click_export(driver, report)
+    open_report(driver, report)
+    set_period(driver, report)
+    click_search(driver)
+    wait_for_report_data(driver)
+    time.sleep(1)  # let the grid settle before exporting
+    export_print_csv(driver)
     raw = wait_for_download(download_dir)
     return rename_download(raw, prop["code"], report["name"], download_dir)
