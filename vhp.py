@@ -141,28 +141,52 @@ def _login_form(driver):
     return user, pwd, submit
 
 
-def ensure_logged_in(driver, prop, creds):
-    """Make sure this property is logged in, filling the login form if shown.
+def _has_captcha(driver):
+    """True if the login screen is showing a CAPTCHA (which blocks auto-login)."""
+    if driver.find_elements(
+        By.XPATH,
+        "//input[contains(translate(@placeholder,"
+        "'abcdefghijklmnopqrstuvwxyz','ABCDEFGHIJKLMNOPQRSTUVWXYZ'),'CAPTCHA')]",
+    ):
+        return True
+    for el in driver.find_elements(By.XPATH, "//*[contains({}, 'CAPTCHA')]".format(_ci("."))):
+        try:
+            if el.is_displayed():
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
 
-    creds is (username, password) or None. Raises LoginRequired if a login form
-    is present but we have no usable credentials, or if login doesn't complete.
-    Logging in happens in the SAME browser we then scrape with, so it does not
-    depend on a session persisting between runs.
+
+def ensure_logged_in(driver, prop, creds, probe_url):
+    """Ensure we're logged in, reusing a saved session when possible.
+
+    1. Navigate to probe_url (a real authenticated page). If it renders with no
+       login form, the saved session is still valid -> done (no login needed).
+    2. Otherwise a login form is showing:
+       * If it has a CAPTCHA, we cannot auto-login -> LoginRequired. The human
+         runs login.py once, solves the CAPTCHA, and the session is reused.
+       * Else fill the username/password and submit.
     """
-    driver.get(prop["home_url"])
-    time.sleep(3)  # let the SPA render (login form or app)
+    driver.get(probe_url)
+    time.sleep(3)  # let the SPA render (app or login form)
 
-    form = _login_form(driver)
-    if form is None:
-        return  # already logged in — no form shown
+    if _login_form(driver) is None:
+        return  # saved session still valid -> logged in
 
-    user_el, pwd_el, submit_el = form
-    if not creds or user_el is None:
+    if _has_captcha(driver):
         raise LoginRequired(
-            "login form shown for {} but no credentials set "
-            "(fill credentials.py)".format(prop["code"])
+            "{code}: login needs a CAPTCHA — run `python login.py {code}`, log in "
+            "by hand once, then the saved session is reused.".format(code=prop["code"])
         )
 
+    form = _login_form(driver)
+    if not creds or form is None or form[0] is None:
+        raise LoginRequired(
+            "{}: not logged in and no usable credentials/login form".format(prop["code"])
+        )
+
+    user_el, pwd_el, submit_el = form
     user_el.clear()
     user_el.send_keys(creds[0])
     pwd_el.clear()
@@ -172,14 +196,13 @@ def ensure_logged_in(driver, prop, creds):
     else:
         pwd_el.send_keys(Keys.RETURN)
 
-    # Wait for the login form to go away (login succeeded).
     end = time.time() + 40
     while time.time() < end:
         if _login_form(driver) is None:
             return
         time.sleep(0.5)
     raise LoginRequired(
-        "login did not complete for {} — check the username/password".format(prop["code"])
+        "{}: login did not complete — check the username/password".format(prop["code"])
     )
 
 

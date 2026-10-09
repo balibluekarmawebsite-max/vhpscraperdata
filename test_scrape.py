@@ -41,11 +41,9 @@ def main(argv):
     try:
         print("Logging in as {} ...".format(code))
         try:
-            ensure_logged_in(driver, prop, creds)
+            ensure_logged_in(driver, prop, creds, reports[0]["url"])
         except LoginRequired as exc:
             print("LOGIN FAILED: {}".format(exc))
-            print("-> Create credentials.py (copy credentials.example.py) and put")
-            print("   {}'s VHP username + password in it, then re-run.".format(code))
             return 1
         print("Logged in OK.")
 

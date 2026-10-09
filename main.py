@@ -93,9 +93,10 @@ def run_property(logger, prop, reports):
         driver = make_driver(prop["profile"], config.DOWNLOADS_DIR)
 
         try:
-            ensure_logged_in(driver, prop, config.get_credentials(prop["code"]))
+            ensure_logged_in(driver, prop, config.get_credentials(prop["code"]),
+                             reports[0]["url"])
         except LoginRequired as exc:
-            logger.error("[%s] login failed (%s) — set credentials.py", prop["code"], exc)
+            logger.error("[%s] login: %s", prop["code"], exc)
             return 0, len(reports)
 
         for report in reports:
