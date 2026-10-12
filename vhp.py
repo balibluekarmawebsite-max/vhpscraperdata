@@ -757,10 +757,11 @@ def _vc_click_arrow(driver, direction):
     return False
 
 
-def _click_vc_day(driver, date, max_nav=18):
+def _click_vc_day(driver, date, max_nav=30):
     """Click a V-Calendar day by its exact 'id-YYYY-MM-DD' class (paging the
-    calendar toward the target month if it isn't currently shown). Prefers the
-    real in-month cell over an adjacent-month spillover cell of the same date."""
+    calendar toward the target month if it isn't currently shown, and retrying
+    while the grid renders / the open animation settles). Prefers the real
+    in-month cell over an adjacent-month spillover cell of the same date."""
     iso = date.strftime("%Y-%m-%d")
     xp_in = ("//*[contains(concat(' ',normalize-space(@class),' '),' id-{iso} ')]"
              "[not(contains(concat(' ',normalize-space(@class),' '),' is-not-in-month '))]"
@@ -781,17 +782,14 @@ def _click_vc_day(driver, date, max_nav=18):
                 except Exception:  # noqa: BLE001
                     continue
         rendered = _vc_rendered_dates(driver)
-        if not rendered:
-            break
-        if date < min(rendered):
-            if not _vc_click_arrow(driver, "left"):
-                break
-        elif date > max(rendered):
-            if not _vc_click_arrow(driver, "right"):
-                break
-        else:
-            break  # within the shown range but not found — give up
-        time.sleep(0.5)
+        if rendered and date < min(rendered):
+            _vc_click_arrow(driver, "left")
+        elif rendered and date > max(rendered):
+            _vc_click_arrow(driver, "right")
+        # else: in-range (or nothing rendered yet) -> the grid may still be
+        # rendering / the open animation settling, so wait and retry rather than
+        # giving up (this is what made a day click miss under a slow render).
+        time.sleep(0.4)
     return False
 
 
@@ -807,6 +805,7 @@ def _try_calendar_range(driver, field, start, end):
         return False
     is_vcal = ("vc-day" in (dump or "")) or bool(driver.find_elements(By.CSS_SELECTOR, ".vc-day"))
     if is_vcal:
+        time.sleep(0.7)  # let the open (slide-fade) animation settle before clicking
         # Range mode = click the start day, then the end day.
         if not _click_vc_day(driver, start):
             print("    (period) could not click start {}".format(start.strftime("%Y-%m-%d")))
