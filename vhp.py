@@ -1227,41 +1227,83 @@ def _norm_folders(folders):
         folders = [folders]
     folders = [f for f in dict.fromkeys(folders) if f]  # de-dupe, keep order
     for f in folders:
-        os.makedirs(f, exist_ok=True)
+        try:
+            os.makedirs(f, exist_ok=True)
+        except Exception:  # noqa: BLE001 - e.g. a user folder we can't create
+            pass
     return folders
+
+
+def _listdir(folder):
+    try:
+        return os.listdir(folder)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _is_temp_download(name):
+    n = name.lower()
+    return n.endswith(".crdownload") or n.endswith(".tmp") or n.endswith(".partial")
 
 
 def snapshot_dirs(folders=None):
     """Record each folder's current files, to call BEFORE triggering a download
     so even an instant download is detected as new."""
     folders = _norm_folders(folders)
-    return {f: set(os.listdir(f)) for f in folders}
+    return {f: set(_listdir(f)) for f in folders}
 
 
-def wait_for_download(folders=None, timeout=None, before=None):
-    """Return the path of a newly finished download, watching one or more
-    folders (Chrome writes a temporary .crdownload until it finishes). Pass
-    `before` from snapshot_dirs() taken before the download was triggered."""
+def wait_for_download(folders=None, timeout=None, before=None, since=None):
+    """Return the path of a newly finished download. Detected two ways, so a
+    same-name re-download isn't missed:
+      1. a file NOT in the `before` snapshot (unique-named exports), and
+      2. any <EXPORT_EXT> file whose mtime is at/after `since` — this catches a
+         report (e.g. the yearly-forecast 'Print CSV') that writes the SAME
+         filename every run, which a name-only diff would never see as 'new'.
+    Chrome writes a .crdownload until the file is complete, so temp files are
+    skipped. On timeout it lists the newest files it DID see, to reveal where the
+    download actually landed."""
     if timeout is None:
         timeout = config.DOWNLOAD_TIMEOUT
     folders = _norm_folders(folders)
     if before is None:
-        before = {f: set(os.listdir(f)) for f in folders}
+        before = {f: set(_listdir(f)) for f in folders}
+    if since is None:
+        since = time.time() - 2  # small clock-skew allowance
+    want_ext = "." + config.EXPORT_EXT.lower().lstrip(".")
     end = time.time() + timeout
     while time.time() < end:
         for f in folders:
-            new_files = set(os.listdir(f)) - before[f]
-            done = [
-                x for x in new_files
-                if not x.endswith(".crdownload") and not x.endswith(".tmp")
-            ]
-            if done:
-                done.sort(key=lambda x: os.path.getmtime(os.path.join(f, x)), reverse=True)
-                return os.path.join(f, done[0])
+            cands = []
+            for x in _listdir(f):
+                if _is_temp_download(x):
+                    continue
+                p = os.path.join(f, x)
+                is_new = x not in before.get(f, set())
+                try:
+                    fresh = x.lower().endswith(want_ext) and os.path.getmtime(p) >= since
+                except OSError:
+                    fresh = False
+                if is_new or fresh:
+                    cands.append(p)
+            if cands:
+                cands.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                return cands[0]
         time.sleep(1)
+    # Timeout: show the newest few files in each watched folder for diagnosis.
+    diag = []
+    for f in folders:
+        rows = []
+        for x in _listdir(f):
+            try:
+                rows.append((os.path.getmtime(os.path.join(f, x)), x))
+            except OSError:
+                continue
+        rows.sort(reverse=True)
+        diag.append("{} -> {}".format(f, ", ".join(n for _, n in rows[:5]) or "(empty)"))
     raise TimeoutError(
-        "download did not finish within {}s (watched: {})".format(timeout, ", ".join(folders))
-    )
+        "download did not finish within {}s. Newest files seen: {}".format(
+            timeout, " | ".join(diag)))
 
 
 def _unique(path):
@@ -1331,7 +1373,8 @@ def scrape_report(driver, prop, report, download_dir):
         except Exception:  # noqa: BLE001
             pass
     _before = snapshot_dirs(config.DOWNLOAD_WATCH)  # snapshot BEFORE the click
+    _since = time.time()                            # mtime floor for the download
     step("export Print CSV", lambda: export_print_csv(driver))
     raw = step("wait for download",
-               lambda: wait_for_download(config.DOWNLOAD_WATCH, before=_before))
+               lambda: wait_for_download(config.DOWNLOAD_WATCH, before=_before, since=_since))
     return rename_download(raw, prop["code"], report["name"], download_dir)
