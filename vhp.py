@@ -536,34 +536,37 @@ def _close_overlays(driver):
         time.sleep(0.25)
 
 
+# Overlays whose backdrop dims the page and swallows clicks: a modal dialog, OR
+# a side DRAWER like VHP's Notification panel (left open, it blocks everything).
+_OVERLAY_BACKDROPS = ".q-dialog__backdrop, .q-drawer__backdrop"
+
+
 def dismiss_blocking_dialog(driver):
-    """If a Quasar MODAL (q-dialog) is covering the page, its full-screen backdrop
-    intercepts every real click — so the toolbar menu won't open, segment options
-    won't select, and calendar days won't click (the JS-click fallback is ignored
-    by Quasar/V-Calendar). Print what the modal is (once per call), then close it:
-    ESC, its close button, a backdrop click, and finally neutralise any remaining
-    full-screen backdrop so clicks reach the page. Returns True if one was seen."""
-    backdrops = []
-    for b in driver.find_elements(By.CSS_SELECTOR, ".q-dialog__backdrop"):
-        try:
-            if b.is_displayed():
-                backdrops.append(b)
-        except Exception:  # noqa: BLE001
-            continue
-    if not backdrops:
+    """Close any Quasar overlay (modal dialog OR side drawer, e.g. VHP's
+    Notification panel) whose backdrop dims the page and intercepts every real
+    click — the cause of 'menu not opened' / 'option not found' / 'could not
+    click day'. Print what it is, then close it: ESC, its ✕/close button, a
+    backdrop click, and finally neutralise any backdrop still left so clicks
+    reach the page. Returns True if one was seen."""
+    backdrops = [b for b in driver.find_elements(By.CSS_SELECTOR, _OVERLAY_BACKDROPS)
+                 if _disp_safe(b)]
+    drawers = [d for d in driver.find_elements(By.CSS_SELECTOR, ".q-drawer")
+               if _disp_safe(d)]
+    if not backdrops and not drawers:
         return False
     try:
         html = driver.execute_script(
-            "var d=document.querySelector('.q-dialog__inner, .q-dialog');"
-            "return d ? d.outerHTML.replace(/\\s+/g,' ').slice(0,700) : '(no inner)';")
-        print("    (dialog) blocking modal present -> {}".format(html))
+            "var d=document.querySelector('.q-drawer, .q-dialog__inner, .q-dialog');"
+            "return d ? d.outerHTML.replace(/\\s+/g,' ').slice(0,500) : '(none)';")
+        print("    (overlay) blocking overlay present -> {}".format(html))
     except Exception:  # noqa: BLE001
         pass
-    _close_overlays(driver)
-    # a close/dismiss button inside the dialog
+    _close_overlays(driver)  # ESC
+    # a ✕ / close / cancel control inside the drawer or dialog
     for sel in ("[data-cy*='close']", "[data-cy*='cancel']",
-                ".q-dialog .q-btn[aria-label*='lose']", ".q-dialog .mdi-close",
-                ".q-dialog .mdi-window-close"):
+                ".q-drawer .mdi-close", ".q-drawer .mdi-window-close",
+                ".q-drawer [aria-label*='lose']", ".q-drawer button .q-icon",
+                ".q-dialog .mdi-close", ".q-dialog [aria-label*='lose']"):
         for el in driver.find_elements(By.CSS_SELECTOR, sel):
             try:
                 if el.is_displayed():
@@ -571,22 +574,21 @@ def dismiss_blocking_dialog(driver):
                     time.sleep(0.3)
             except Exception:  # noqa: BLE001
                 continue
-    # click the backdrop (closes non-persistent dialogs)
+    # click the backdrop (an overlay drawer/dialog closes on a backdrop click)
     for b in backdrops:
         try:
             _force_click(driver, b)
             time.sleep(0.3)
         except Exception:  # noqa: BLE001
             continue
-    # still there? neutralise the full-screen backdrop so clicks pass through
-    remaining = [b for b in driver.find_elements(By.CSS_SELECTOR, ".q-dialog__backdrop")
-                 if _disp_safe(b)]
-    if remaining:
+    # still dimming the page? neutralise any backdrop so clicks pass through
+    if [b for b in driver.find_elements(By.CSS_SELECTOR, _OVERLAY_BACKDROPS) if _disp_safe(b)]:
         try:
             driver.execute_script(
-                "document.querySelectorAll('.q-dialog__backdrop').forEach("
-                "function(b){b.style.pointerEvents='none';});")
-            print("    (dialog) backdrop left open — neutralised pointer-events so clicks pass")
+                "document.querySelectorAll(arguments[0]).forEach("
+                "function(b){b.style.pointerEvents='none';b.style.display='none';});",
+                _OVERLAY_BACKDROPS)
+            print("    (overlay) backdrop left open — neutralised so clicks pass through")
         except Exception:  # noqa: BLE001
             pass
     return True
