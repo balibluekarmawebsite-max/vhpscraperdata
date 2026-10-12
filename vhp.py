@@ -982,6 +982,149 @@ def _inputs_summary(field):
     return "{} input(s): {}".format(len(parts), " ".join(parts))
 
 
+# ---------------------------------------------------------------------------
+# Element-UI month picker (the yearly-forecast report's start-month control)
+# ---------------------------------------------------------------------------
+# The yearly-forecast report shows 12 months starting from this month. It's an
+# Element-UI (el-date-editor--month) field, data-cy='field-month', shown as
+# "MM/YYYY" (e.g. "10/2026"), and the input is editable — so we type the month in.
+_MONTH_CY = "field-month"
+
+
+def _month_input(driver):
+    """The editable <input> of the Element-UI month picker, or None."""
+    for css in ("[data-cy='{}'] input".format(_MONTH_CY),
+                "[data-cy='{}'] .el-input__inner".format(_MONTH_CY),
+                "input.el-input__inner"):
+        for e in driver.find_elements(By.CSS_SELECTOR, css):
+            try:
+                if e.is_displayed():
+                    return e
+            except Exception:  # noqa: BLE001
+                continue
+    return None
+
+
+def _month_value(driver, inp=None):
+    inp = inp or _month_input(driver)
+    if inp is None:
+        return ""
+    try:
+        return (inp.get_attribute("value") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _month_matches(shown, target):
+    """True if `shown` (e.g. '01/2026' or '2026-01') is target's month+year."""
+    m = re.search(r"(\d{1,2})\s*[/\-]\s*(\d{4})", shown or "")
+    if m:
+        return int(m.group(1)) == target.month and int(m.group(2)) == target.year
+    m = re.search(r"(\d{4})\s*[/\-]\s*(\d{1,2})", shown or "")  # YYYY-MM form
+    if m:
+        return int(m.group(1)) == target.year and int(m.group(2)) == target.month
+    return False
+
+
+def _panel_year(driver):
+    """The year currently shown in an open Element-UI month panel, or None."""
+    for css in (".el-date-picker__header-label", ".el-picker-panel__header label",
+                ".el-date-picker__header", ".el-picker-panel__header"):
+        for e in driver.find_elements(By.CSS_SELECTOR, css):
+            try:
+                if e.is_displayed():
+                    m = re.search(r"(\d{4})", e.text or "")
+                    if m:
+                        return int(m.group(1))
+            except Exception:  # noqa: BLE001
+                continue
+    return None
+
+
+def _set_month_via_panel(driver, target):
+    """Fallback: open the month panel, page the year to target, click the month
+    cell by position (Jan..Dec = cells 0..11, locale-independent)."""
+    inp = _month_input(driver)
+    if inp is None:
+        return False
+    _safe_click(driver, inp)
+    if not _wait_css(driver, ".el-month-table, .el-date-picker, .el-picker-panel", 2.0):
+        return False
+    for _ in range(30):
+        yr = _panel_year(driver)
+        if yr is None or yr == target.year:
+            break
+        arrow = ".el-icon-d-arrow-left" if target.year < yr else ".el-icon-d-arrow-right"
+        btns = [b for b in driver.find_elements(By.CSS_SELECTOR, arrow) if _disp_safe(b)]
+        if not btns:
+            break
+        _safe_click(driver, btns[0])
+        time.sleep(0.2)
+    cells = [c for c in driver.find_elements(By.CSS_SELECTOR, ".el-month-table td")
+             if _disp_safe(c)]
+    if len(cells) >= 12:
+        _force_click(driver, cells[target.month - 1])
+        time.sleep(0.4)
+        _close_overlays(driver)
+        return True
+    return False
+
+
+def _set_month_picker(driver, target):
+    """Set the yearly-forecast month picker to target's month+year (shown MM/YYYY).
+    Types the value into the editable input first, then falls back to the panel.
+    Returns True once the field reads back as target."""
+    want = "{:02d}/{:04d}".format(target.month, target.year)
+    # the control can hydrate slightly after the page's Search button appears
+    end = time.time() + 15
+    inp = None
+    while time.time() < end:
+        inp = _month_input(driver)
+        if inp is not None:
+            break
+        time.sleep(0.5)
+    if inp is None:
+        print("    (month) no month picker (data-cy='{}') found. Field labels: {}"
+              .format(_MONTH_CY, ", ".join(_field_labels(driver)) or "(none)"))
+        print("    (month) page diag:\n{}".format(_dump_date_diag(driver)))
+        return False
+
+    print("    (month) want {} | field now shows: {}".format(want, _month_value(driver, inp) or "(blank)"))
+
+    # Strategy 1: type MM/YYYY into the editable input, commit with Enter.
+    try:
+        inp.click()
+        time.sleep(0.2)
+        inp.send_keys(Keys.CONTROL, "a")
+        inp.send_keys(Keys.DELETE)
+        inp.send_keys(want)
+        time.sleep(0.3)
+        inp.send_keys(Keys.ENTER)
+        time.sleep(0.7)
+    except Exception as exc:  # noqa: BLE001
+        print("    (month) typing failed: {}".format(_describe(exc)))
+    _close_overlays(driver)
+    shown = _month_value(driver)
+    if _month_matches(shown, target):
+        print("    (month) set to {} by typing (field shows: {})".format(want, shown))
+        return True
+
+    # Strategy 2: the panel (year arrows + month cell by position).
+    print("    (month) typing didn't stick (shows {}); trying the panel".format(shown or "(blank)"))
+    try:
+        if _set_month_via_panel(driver, target):
+            shown = _month_value(driver)
+            if _month_matches(shown, target):
+                print("    (month) set to {} via panel (field shows: {})".format(want, shown))
+                return True
+    except Exception as exc:  # noqa: BLE001
+        print("    (month) panel strategy error: {}".format(_describe(exc)))
+
+    print("    (month) WARNING could not set month to {} (field shows {}). Send me "
+          "this block and I'll adjust.".format(want, _month_value(driver) or "(blank)"))
+    return False
+
+
 def set_period(driver, report):
     """Set the report's Date filter before SEARCH (e.g. the last 7 days for the
     weekly reservation report). NON-FATAL wrapper: any error is swallowed (we
@@ -1003,6 +1146,19 @@ def _set_period_inner(driver, report):
     calendar popup, (3) a JS value-set, verifying each by reading the field back.
     Returns True once the shown range matches. Reports with no Date field (period
     None, or no such control) are a safe no-op."""
+    p = report.get("period")
+    # Month-picker reports (yearly-forecast): period = {"month": "YYYY-MM"}.
+    # Drive the Element-UI month field instead of the date-range calendar.
+    if isinstance(p, dict) and p.get("month") and not (p.get("start") and p.get("end")):
+        try:
+            target = _parse_iso("{}-01".format(p["month"]))
+        except Exception as exc:  # noqa: BLE001
+            print("    (period) bad month {!r}: {}".format(p.get("month"), _describe(exc)))
+            return False
+        ok = _set_month_picker(driver, target)
+        _close_overlays(driver)
+        return ok
+
     try:
         rng = _period_range(report)
     except Exception as exc:  # noqa: BLE001 - bad period config must not abort
