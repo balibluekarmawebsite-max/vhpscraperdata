@@ -1133,8 +1133,19 @@ def _segment_untick(driver, exclude_labels):
     if field is None:
         raise RuntimeError("Segment Code field (data-cy) not found")
 
-    _safe_click(driver, field)  # open the dropdown
-    time.sleep(1.0)
+    # Open the dropdown; retry until its options actually render (slower PCs /
+    # longer code lists can lag behind the click).
+    for _ in range(3):
+        _safe_click(driver, field)
+        opened = False
+        for _ in range(12):
+            if driver.find_elements(By.CSS_SELECTOR, ".q-menu .q-item"):
+                opened = True
+                break
+            time.sleep(0.2)
+        if opened:
+            break
+    time.sleep(0.3)
 
     # Deterministic start: make sure everything is selected.
     if _segment_value(driver).upper() != "ALL":
@@ -1152,43 +1163,86 @@ def _segment_untick(driver, exclude_labels):
         print("    (config) Segment Code: de-selected {!r}".format(lbl))
         time.sleep(0.4)
 
-    try:  # close the dropdown so it doesn't block SEARCH
-        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-    except Exception:  # noqa: BLE001
-        pass
-    time.sleep(0.4)
+    # Close the dropdown fully so it can't bleed into SEARCH or the export menu.
+    for _ in range(3):
+        try:
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.3)
+        if not any(_disp_safe(m) for m in driver.find_elements(By.CSS_SELECTOR, ".q-menu")):
+            break
+        try:  # still open -> toggle the field closed
+            _safe_click(driver, field)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.3)
     print("    (config) Segment Code now shows: {}".format(_segment_value(driver)[:70] or "(blank)"))
+
+
+# Scroll the open q-menu's actual scrollable list. arguments: (delta, absolute).
+# Finds the real scroll container (the descendant that overflows) rather than
+# guessing a class, so a long virtual-scroll list pages correctly.
+_SCROLL_MENU_JS = (
+    "var menus=document.querySelectorAll('.q-menu'), menu=null;"
+    "for(var i=0;i<menus.length;i++){var r=menus[i].getBoundingClientRect();"
+    "if(r.width>0&&r.height>0){menu=menus[i];break;}}"
+    "if(!menu){return -1;}"
+    "function sc(root){var a=[root].concat([].slice.call(root.querySelectorAll('*')));"
+    "for(var j=0;j<a.length;j++){if(a[j].scrollHeight-a[j].clientHeight>4){return a[j];}}return root;}"
+    "var s=sc(menu);"
+    "if(arguments[1]){s.scrollTop=arguments[0];}else{s.scrollTop=s.scrollTop+arguments[0];}"
+    "return s.scrollTop;"
+)
 
 
 def _find_option(driver, label):
     """Find a dropdown option whose q-item label EXACTLY equals `label`,
-    scrolling the virtually-scrolled menu until it renders. Returns the
-    clickable q-item row, or None."""
+    sweeping the open menu's real scrollable list (virtual scroll) top-to-bottom.
+    Returns the clickable q-item row (scrolled into view), or None."""
     want = label.upper()
     xp = (
         "//div[contains(@class,'q-item')]"
         "[.//div[contains(@class,'q-item__label')]"
         "[translate(normalize-space(.),'{lo}','{up}')={w!r}]]"
     ).format(lo=_LOWER, up=_UPPER, w=want)
-    last = -1.0
-    for _ in range(40):
+
+    def _hit():
         for el in driver.find_elements(By.XPATH, xp):
-            if el.is_displayed():
-                return el
-        moved = driver.execute_script(
-            "var m=document.querySelector('.q-menu .scroll, .q-menu .q-virtual-scroll,"
-            " .q-virtual-scroll, .q-menu'); if(!m){return -1;}"
-            " var b=m.scrollTop; m.scrollTop=b+200; return m.scrollTop;"
-        )
-        try:
-            moved = float(moved)
-        except Exception:  # noqa: BLE001
-            moved = -1.0
-        time.sleep(0.25)
-        if moved == last:  # scroll didn't advance -> reached the end
+            try:
+                if el.is_displayed():
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                    return el
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
+    # Wait for options to render after the menu opens (slower PCs / longer lists).
+    for _ in range(12):
+        if driver.find_elements(By.CSS_SELECTOR, ".q-menu .q-item"):
             break
-        last = moved
-    return None
+        time.sleep(0.2)
+
+    driver.execute_script(_SCROLL_MENU_JS, 0, True)  # start at the top
+    time.sleep(0.2)
+    last, stalls = -1.0, 0
+    for _ in range(80):
+        hit = _hit()
+        if hit is not None:
+            return hit
+        try:
+            pos = float(driver.execute_script(_SCROLL_MENU_JS, 240, False))
+        except Exception:  # noqa: BLE001
+            pos = -1.0
+        time.sleep(0.2)
+        if pos == last:  # list didn't advance; allow a couple of lazy-render stalls
+            stalls += 1
+            if stalls >= 3:
+                break
+        else:
+            stalls = 0
+        last = pos
+    return _hit()
 
 
 def click_search(driver):
