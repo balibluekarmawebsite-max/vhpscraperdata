@@ -119,11 +119,17 @@ def run_property(logger, prop, reports):
                 fail = len(reports) - ok  # this + remaining reports can't run
                 break
             except UploadError as exc:
-                # Downloaded fine but the dashboard rejected/failed the push. The
-                # CSV is safe on disk; log loudly (a human may need to act, e.g.
-                # 409 locked week, 422 unreadable file, 401 bad token).
-                fail += 1
-                logger.error("[%s] downloaded OK but UPLOAD FAILED: %s", tag, exc)
+                # Downloaded fine but the dashboard didn't accept the push.
+                if exc.status == 409:
+                    # That week is finalised/approved in the dashboard — this is
+                    # intentional, not a failure. Skip (a human reopens it there
+                    # to allow an update); don't raise a false "run failed" alert.
+                    logger.warning("[%s] week is locked/approved in the dashboard "
+                                   "— skipped (reopen it there to update): %s", tag, exc)
+                else:
+                    # 400/401/422/501 (needs a human) or 5xx/network after retries.
+                    fail += 1
+                    logger.error("[%s] downloaded OK but UPLOAD FAILED: %s", tag, exc)
             except Exception as exc:  # noqa: BLE001 - isolate per-report failures
                 fail += 1
                 logger.exception("[%s] FAILED: %s", tag, exc)
