@@ -122,6 +122,14 @@ EXPORT_EXT = "csv"
 # How long to wait (seconds) for a download to finish before giving up.
 DOWNLOAD_TIMEOUT = 120
 
+# Folders to watch for a finished download. We prefer our own downloads/ dir,
+# but Chrome (attached to an existing window) can land files in the user's
+# default Downloads after a page navigation — so watch both.
+DOWNLOAD_WATCH = [
+    DOWNLOADS_DIR,
+    os.path.join(os.path.expanduser("~"), "Downloads"),
+]
+
 # Optional failure alerting. Leave webhook empty to disable Slack alerts.
 ALERTS = {
     "slack_webhook": os.environ.get("VHP_SLACK_WEBHOOK", ""),

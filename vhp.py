@@ -420,6 +420,7 @@ def export_print_csv(driver):
     if not buttons:
         raise RuntimeError("print/refresh toolbar not found above the table")
     last_err = None
+    saw_print_menu = False
     for btn in reversed(buttons):  # printer is the right-most icon; try it first
         try:
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
@@ -431,6 +432,10 @@ def export_print_csv(driver):
             last_err = exc
             continue
         time.sleep(0.9)  # let the menu animate in
+        # diagnostic: did ANY print-ish menu item appear?
+        if any(e.is_displayed() for e in driver.find_elements(
+                By.XPATH, "//*[contains(@class,'q-item')][contains({}, 'PRINT')]".format(_ci(".")))):
+            saw_print_menu = True
         items = [el for el in driver.find_elements(By.XPATH, PRINT_CSV_ITEM) if el.is_displayed()]
         if items:
             _safe_click(driver, items[0])
@@ -441,8 +446,9 @@ def export_print_csv(driver):
             pass
         time.sleep(0.3)
     raise RuntimeError(
-        "'Print CSV' not found after clicking the toolbar ({} button(s) tried){}".format(
+        "'Print CSV' not found ({} button(s) tried; a Print menu {} seen){}".format(
             len(buttons),
+            "WAS" if saw_print_menu else "was NOT",
             "" if last_err is None else "; last click error: {}".format(last_err),
         )
     )
@@ -451,29 +457,34 @@ def export_print_csv(driver):
 # ---------------------------------------------------------------------------
 # download capture
 # ---------------------------------------------------------------------------
-def wait_for_download(folder, timeout=None):
-    """Return the path of the newly downloaded file (Chrome writes a temporary
-    .crdownload until the download finishes)."""
+def wait_for_download(folders=None, timeout=None):
+    """Return the path of a newly finished download, watching one or more
+    folders (Chrome writes a temporary .crdownload until it finishes)."""
     if timeout is None:
         timeout = config.DOWNLOAD_TIMEOUT
-    os.makedirs(folder, exist_ok=True)
-    before = set(os.listdir(folder))
+    if folders is None:
+        folders = config.DOWNLOAD_WATCH
+    if isinstance(folders, str):
+        folders = [folders]
+    folders = [f for f in dict.fromkeys(folders) if f]  # de-dupe, keep order
+    for f in folders:
+        os.makedirs(f, exist_ok=True)
+    before = {f: set(os.listdir(f)) for f in folders}
     end = time.time() + timeout
     while time.time() < end:
-        new_files = set(os.listdir(folder)) - before
-        done = [
-            f
-            for f in new_files
-            if not f.endswith(".crdownload") and not f.endswith(".tmp")
-        ]
-        if done:
-            done.sort(
-                key=lambda f: os.path.getmtime(os.path.join(folder, f)),
-                reverse=True,
-            )
-            return os.path.join(folder, done[0])
+        for f in folders:
+            new_files = set(os.listdir(f)) - before[f]
+            done = [
+                x for x in new_files
+                if not x.endswith(".crdownload") and not x.endswith(".tmp")
+            ]
+            if done:
+                done.sort(key=lambda x: os.path.getmtime(os.path.join(f, x)), reverse=True)
+                return os.path.join(f, done[0])
         time.sleep(1)
-    raise TimeoutError("download did not finish within {}s".format(timeout))
+    raise TimeoutError(
+        "download did not finish within {}s (watched: {})".format(timeout, ", ".join(folders))
+    )
 
 
 def _unique(path):
@@ -528,6 +539,12 @@ def scrape_report(driver, prop, report, download_dir):
     step("click SEARCH", lambda: click_search(driver))
     step("wait for data", lambda: wait_for_report_data(driver))
     time.sleep(1)  # let the grid settle before exporting
+    # Re-assert the download directory (page navigation can reset it).
+    for _cmd in ("Browser.setDownloadBehavior", "Page.setDownloadBehavior"):
+        try:
+            driver.execute_cdp_cmd(_cmd, {"behavior": "allow", "downloadPath": download_dir})
+        except Exception:  # noqa: BLE001
+            pass
     step("export Print CSV", lambda: export_print_csv(driver))
-    raw = step("wait for download", lambda: wait_for_download(download_dir))
+    raw = step("wait for download", lambda: wait_for_download(config.DOWNLOAD_WATCH))
     return rename_download(raw, prop["code"], report["name"], download_dir)
