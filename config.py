@@ -87,6 +87,9 @@ REPORTS = [
         "cadence": "daily",   # change to "weekly"/"both" here anytime
         "url": "https://e1-vhp.com/fr/report/yearly-forecast-of-room-occupancy",
         "period": "current_month",
+        # Filter settings applied before SEARCH (best-effort; see vhp.configure_report):
+        "checkboxes": {"Show Revenue": True},
+        "segment_untick": ["Complimentary", "House Use"],
     },
     {
         "name": "reservation-by-creation-date",

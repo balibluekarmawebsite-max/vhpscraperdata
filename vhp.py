@@ -246,6 +246,96 @@ def set_period(driver, report):
     return
 
 
+def configure_report(driver, report):
+    """Best-effort: apply the report's filter settings before SEARCH.
+
+    Optional report fields in config.py:
+        checkboxes:      {"Show Revenue": True}      -> set each checkbox
+        segment_untick:  ["Complimentary", "House Use"]  -> de-select in Segment Code
+
+    Never raises — it prints what it did (or couldn't) and the scrape carries on.
+    """
+    for label, want in (report.get("checkboxes") or {}).items():
+        try:
+            changed = _set_checkbox(driver, label, bool(want))
+            print("    (config) checkbox {!r} -> {}{}".format(
+                label, "on" if want else "off", "" if changed else " (already)"))
+        except Exception as exc:  # noqa: BLE001
+            print("    (config) checkbox {!r}: {}".format(label, _describe(exc)))
+
+    labels = report.get("segment_untick") or []
+    if labels:
+        try:
+            _multiselect_untick(driver, "Segment Code", labels)
+        except Exception as exc:  # noqa: BLE001
+            print("    (config) Segment Code untick {}: {}".format(labels, _describe(exc)))
+
+
+def _set_checkbox(driver, label, want):
+    """Set a Quasar checkbox (found by its visible label) to want (bool).
+    Returns True if it changed, False if already in the wanted state."""
+    target = None
+    for el in driver.find_elements(
+        By.XPATH,
+        "//*[contains(@class,'q-checkbox')][contains({}, {!r})]".format(_ci("."), label.upper()),
+    ):
+        if el.is_displayed():
+            target = el
+            break
+    if target is None:
+        raise RuntimeError("checkbox not found")
+    checked = (target.get_attribute("aria-checked") or "").lower() == "true"
+    if checked == want:
+        return False
+    _safe_click(driver, target)
+    return True
+
+
+def _multiselect_untick(driver, field_label, option_labels):
+    """Open a Quasar multi-select (found by its field label) and de-select the
+    given option labels if they are currently selected."""
+    select = None
+    for el in driver.find_elements(
+        By.XPATH,
+        "//*[contains({ci}, {lbl})]/following::*[contains(@class,'q-select')][1]".format(
+            ci=_ci("."), lbl=repr(field_label.upper())
+        ),
+    ):
+        if el.is_displayed():
+            select = el
+            break
+    if select is None:
+        raise RuntimeError("{!r} control not found".format(field_label))
+
+    _safe_click(driver, select)  # open the dropdown
+    time.sleep(0.9)
+    for opt in option_labels:
+        hit = None
+        for item in driver.find_elements(
+            By.XPATH,
+            "//*[contains(@class,'q-item')][contains({}, {!r})]".format(_ci("."), opt.upper()),
+        ):
+            if item.is_displayed():
+                hit = item
+                break
+        if hit is None:
+            print("    (config) Segment Code: option {!r} not shown".format(opt))
+            continue
+        selected = (hit.get_attribute("aria-selected") or "").lower() == "true"
+        if selected:
+            _safe_click(driver, hit)
+            print("    (config) Segment Code: unticked {!r}".format(opt))
+            time.sleep(0.3)
+        else:
+            print("    (config) Segment Code: {!r} already off".format(opt))
+
+    try:  # close the dropdown so it doesn't block SEARCH
+        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+    except Exception:  # noqa: BLE001
+        pass
+    time.sleep(0.4)
+
+
 def click_search(driver):
     btn = WebDriverWait(driver, 30).until(
         EC.element_to_be_clickable((By.XPATH, SEARCH_BTN))
@@ -379,6 +469,7 @@ def scrape_report(driver, prop, report, download_dir):
 
     step("open report", lambda: open_report(driver, report))
     step("set period", lambda: set_period(driver, report))
+    configure_report(driver, report)  # best-effort filter settings (non-fatal)
     step("click SEARCH", lambda: click_search(driver))
     step("wait for data", lambda: wait_for_report_data(driver))
     time.sleep(1)  # let the grid settle before exporting
