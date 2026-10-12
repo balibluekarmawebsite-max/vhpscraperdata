@@ -457,11 +457,7 @@ def export_print_csv(driver):
 # ---------------------------------------------------------------------------
 # download capture
 # ---------------------------------------------------------------------------
-def wait_for_download(folders=None, timeout=None):
-    """Return the path of a newly finished download, watching one or more
-    folders (Chrome writes a temporary .crdownload until it finishes)."""
-    if timeout is None:
-        timeout = config.DOWNLOAD_TIMEOUT
+def _norm_folders(folders):
     if folders is None:
         folders = config.DOWNLOAD_WATCH
     if isinstance(folders, str):
@@ -469,7 +465,25 @@ def wait_for_download(folders=None, timeout=None):
     folders = [f for f in dict.fromkeys(folders) if f]  # de-dupe, keep order
     for f in folders:
         os.makedirs(f, exist_ok=True)
-    before = {f: set(os.listdir(f)) for f in folders}
+    return folders
+
+
+def snapshot_dirs(folders=None):
+    """Record each folder's current files, to call BEFORE triggering a download
+    so even an instant download is detected as new."""
+    folders = _norm_folders(folders)
+    return {f: set(os.listdir(f)) for f in folders}
+
+
+def wait_for_download(folders=None, timeout=None, before=None):
+    """Return the path of a newly finished download, watching one or more
+    folders (Chrome writes a temporary .crdownload until it finishes). Pass
+    `before` from snapshot_dirs() taken before the download was triggered."""
+    if timeout is None:
+        timeout = config.DOWNLOAD_TIMEOUT
+    folders = _norm_folders(folders)
+    if before is None:
+        before = {f: set(os.listdir(f)) for f in folders}
     end = time.time() + timeout
     while time.time() < end:
         for f in folders:
@@ -545,6 +559,8 @@ def scrape_report(driver, prop, report, download_dir):
             driver.execute_cdp_cmd(_cmd, {"behavior": "allow", "downloadPath": download_dir})
         except Exception:  # noqa: BLE001
             pass
+    _before = snapshot_dirs(config.DOWNLOAD_WATCH)  # snapshot BEFORE the click
     step("export Print CSV", lambda: export_print_csv(driver))
-    raw = step("wait for download", lambda: wait_for_download(config.DOWNLOAD_WATCH))
+    raw = step("wait for download",
+               lambda: wait_for_download(config.DOWNLOAD_WATCH, before=_before))
     return rename_download(raw, prop["code"], report["name"], download_dir)
