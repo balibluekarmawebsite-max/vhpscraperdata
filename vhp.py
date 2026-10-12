@@ -282,30 +282,127 @@ def _el_html(driver, el, limit=1600):
     return html + "" if len(html) <= limit else html[:limit] + " …(truncated)"
 
 
+_QFIELD_ANCESTOR = (
+    "ancestor-or-self::*"
+    "[contains(concat(' ',normalize-space(@class),' '),' q-field ')][1]"
+)
+
+
+def _field_container(driver, el):
+    """Return a container to operate on: the nearest .q-field wrapping `el`,
+    else `el`'s parent, else `el` itself. (Operating on a bare <input> breaks
+    read-back, since an input has no descendants to re-read.)"""
+    try:
+        qf = el.find_elements(By.XPATH, _QFIELD_ANCESTOR)
+        if qf:
+            return qf[0]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return el.find_element(By.XPATH, "..")
+    except Exception:  # noqa: BLE001
+        return el
+
+
 def _find_date_field(driver):
-    """The Quasar field (q-field root) whose label is 'Date'. Falls back to any
-    field whose shown value looks like a 'dd/mm/yy - dd/mm/yy' range."""
-    # Label equals 'Date' (strip a required-marker '*'); strict equality avoids
-    # matching 'Created Date' / 'Creation Date' on the same page.
+    """Locate the Date filter control, robust to VHP not using a Quasar floating
+    label (the 'Date' text sits ABOVE the box and the range lives in an input's
+    VALUE, not as element text). Tried in order:
+      1. any visible input whose VALUE looks like a date / date-range
+      2. a q-field with a floating 'Date' label
+      3. an external 'Date' label, then the next field control after it
+      4. any q-field whose text OR a descendant input value looks like a range
+    """
+    # 1) the input that actually holds the date value (most reliable here).
+    for inp in driver.find_elements(By.CSS_SELECTOR, "input"):
+        try:
+            if not inp.is_displayed():
+                continue
+            v = inp.get_attribute("value") or ""
+            if _looks_like_range(v) or _parse_dates(v):
+                return _field_container(driver, inp)
+        except Exception:  # noqa: BLE001
+            continue
+
+    # 2) a q-field whose floating label is 'Date' (strip a required '*').
     by_label = (
-        "//*[contains(@class,'q-field')]"
+        "//*[contains(concat(' ',normalize-space(@class),' '),' q-field ')]"
         "[.//*[contains(@class,'q-field__label')]"
         "[translate(normalize-space(translate(.,'*','')),'{lo}','{up}')='DATE']]"
     ).format(lo=_LOWER, up=_UPPER)
     for el in driver.find_elements(By.XPATH, by_label):
         if el.is_displayed():
             return el
-    # Fallback: a field control whose displayed text contains a date range.
+
+    # 3) an EXTERNAL label/text equal to 'Date' -> the next q-field after it.
+    lbl_xp = (
+        "//*[translate(normalize-space(translate(.,'*','')),'{lo}','{up}')='DATE']"
+        "[not(.//*[normalize-space(.)!=''])]"
+    ).format(lo=_LOWER, up=_UPPER)
+    for lbl in driver.find_elements(By.XPATH, lbl_xp):
+        try:
+            if not lbl.is_displayed():
+                continue
+            ctrl = lbl.find_element(
+                By.XPATH,
+                "following::*[contains(concat(' ',normalize-space(@class),' '),' q-field ')][1]",
+            )
+            if ctrl.is_displayed():
+                return ctrl
+        except Exception:  # noqa: BLE001
+            continue
+
+    # 4) any q-field whose text or a descendant input value looks like a range.
     for el in driver.find_elements(By.CSS_SELECTOR, ".q-field"):
         try:
             if not el.is_displayed():
                 continue
-            txt = (el.text or "").replace("\n", " ")
-            if _looks_like_range(txt):
+            if _looks_like_range((el.text or "").replace("\n", " ")):
                 return el
+            for inp in el.find_elements(By.CSS_SELECTOR, "input"):
+                if _looks_like_range(inp.get_attribute("value") or ""):
+                    return el
         except Exception:  # noqa: BLE001
             continue
     return None
+
+
+def _dump_date_diag(driver):
+    """JS dump of every input (value/readonly/placeholder/class) and the first
+    element whose text looks like a date, with its parent — so the Date control
+    is fully identifiable from one run even when the q-field heuristics miss."""
+    js = r"""
+    var out = [];
+    var ins = document.querySelectorAll('input');
+    out.push('INPUTS(' + ins.length + '):');
+    for (var i=0;i<ins.length;i++){
+      var e=ins[i];
+      out.push('  <input type=' + (e.type||'') + ' ro=' + e.readOnly +
+               ' val=' + JSON.stringify((e.value||'').slice(0,32)) +
+               ' ph=' + JSON.stringify((e.placeholder||'').slice(0,24)) +
+               ' class=' + JSON.stringify((e.className||'').slice(0,70)) + '>');
+    }
+    var re=/\d{1,2}\/\d{1,2}\/\d{2,4}/;
+    var all=document.querySelectorAll('body *');
+    for (var j=0;j<all.length;j++){
+      var el=all[j];
+      if (el.children.length>2) continue;
+      var t=(el.textContent||'').trim();
+      if (re.test(t) && t.length<48){
+        out.push('DATE-TEXT <' + el.tagName + ' class=' +
+                 JSON.stringify((el.className||'').slice(0,70)) + '> ' + JSON.stringify(t));
+        var p=el.parentElement;
+        if(p){ out.push('  parent <' + p.tagName + ' class=' +
+                 JSON.stringify((p.className||'').slice(0,90)) + '>'); }
+        break;
+      }
+    }
+    return out.join('\n');
+    """
+    try:
+        return driver.execute_script(js)
+    except Exception as exc:  # noqa: BLE001
+        return "(diag failed: {})".format(_describe(exc))
 
 
 def _looks_like_range(txt):
@@ -679,6 +776,7 @@ def _set_period_inner(driver, report):
     if field is None:
         print("    (period) no 'Date' field found (waited 15s). Visible field labels: {}"
               .format(", ".join(_field_labels(driver)) or "(none)"))
+        print("    (period) page diag:\n{}".format(_dump_date_diag(driver)))
         return False
 
     before = _date_field_value(driver, field)
