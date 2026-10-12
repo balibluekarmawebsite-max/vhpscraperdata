@@ -1154,14 +1154,27 @@ def _segment_untick(driver, exclude_labels):
             _safe_click(driver, allopt)
             time.sleep(0.7)
 
+    missing = []
     for lbl in exclude_labels:
         item = _find_option(driver, lbl)
         if item is None:
+            missing.append(lbl)
             print("    (config) Segment Code: {!r} not found".format(lbl))
             continue
         _safe_click(driver, item)
         print("    (config) Segment Code: de-selected {!r}".format(lbl))
         time.sleep(0.4)
+
+    if missing:  # diagnostic: is the menu even open, and what labels are there?
+        try:
+            labels = driver.execute_script(
+                "var out=[];document.querySelectorAll('.q-menu .q-item__label').forEach("
+                "function(e){var t=(e.textContent||'').trim();if(t){out.push(t);}});"
+                "return out.slice(0,60);")
+            menu_open = any(_disp_safe(m) for m in driver.find_elements(By.CSS_SELECTOR, ".q-menu"))
+            print("    (config) segment diag: menu_open={} | options seen: {}".format(menu_open, labels))
+        except Exception:  # noqa: BLE001
+            pass
 
     # Close the dropdown fully so it can't bleed into SEARCH or the export menu.
     for _ in range(3):
