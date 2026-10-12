@@ -7,6 +7,7 @@ which properties to log into, which reports to pull, and where to upload them.
 Nothing in the other files should need editing for normal operation.
 """
 import os
+import socket
 
 # Absolute path of this project folder. Everything else is derived from it so
 # the project works no matter where it's checked out (C:\vhp-scraper, etc.).
@@ -144,6 +145,46 @@ UPLOAD = {
     "retry_backoffs": [2, 4, 8, 16],  # seconds; retried only on network / 429 / 5xx
 }
 
+# ---------------------------------------------------------------------------
+# JOBS — on-demand scraping requested from the dashboard (optional feature)
+# ---------------------------------------------------------------------------
+# When enabled, poller.py runs continuously on this PC and asks the dashboard
+# for queued scrape requests (the dashboard can't reach IN to this office PC, so
+# the PC reaches OUT and polls). For each job it scrapes the requested period and
+# uploads the result through the same /api/import endpoint, then reports the job
+# done/failed. See VHP_JOBS_INTEGRATION.md for the full contract (and the
+# dashboard-side endpoints your dashboard agent builds).
+#
+# Set "enabled": False to turn the whole feature off (the scheduled daily/weekly
+# runs are unaffected — they don't use any of this).
+JOBS = {
+    "enabled": True,
+    # Scraper -> dashboard endpoints (built on the dashboard per the spec):
+    #   claim_url  : POST -> hands back the oldest queued job (or none), atomically
+    #   result_url : POST -> records a job's outcome ({id} is replaced per job)
+    "claim_url": "https://dashboard.bluekarmasecrets.com/api/jobs/claim",
+    "result_url": "https://dashboard.bluekarmasecrets.com/api/jobs/{id}/result",
+    # Reuse the upload token by default (same shared secret). Set a separate
+    # VHP_JOBS_TOKEN env var if you'd rather the queue use its own token.
+    "token": os.environ.get("VHP_JOBS_TOKEN", "") or os.environ.get("IMPORT_API_TOKEN", ""),
+    # A name for THIS PC in the dashboard's job records (who claimed the job).
+    "worker": os.environ.get("VHP_WORKER_ID", "") or socket.gethostname(),
+    "poll_interval": 120,   # seconds to wait between polls when the queue is empty
+    "timeout": 60,          # HTTP timeout (seconds) for claim/result calls
+    "retry_backoffs": [2, 4, 8, 16],  # retry claim/result on network / 429 / 5xx
+    # Safety gate for section B (yearly-forecast) requested for a PAST month: until
+    # we've inspected how that report surfaces a closed month's actuals in VHP,
+    # a past-month B job FAILS cleanly rather than uploading the current (wrong)
+    # data mislabelled as that month. Flip True once set_period is confirmed for
+    # the yearly-forecast report. (A B job for the CURRENT month always runs — the
+    # default export already shows it.)
+    "section_b_past_month_supported": False,
+}
+
+# Lock file that serialises Chrome access so an on-demand job (poller.py) and the
+# scheduled run (main.py) never overlap and kill each other's chromedriver.
+RUN_LOCK_PATH = os.path.join(BASE, "vhp-run.lock")
+
 # Export file extension VHP's "Print CSV" produces (used when renaming).
 EXPORT_EXT = "csv"
 
@@ -173,6 +214,17 @@ try:
     from credentials import CREDENTIALS as _CREDS
 except Exception:  # file not created yet
     _CREDS = {}
+
+
+def report_by_section(section):
+    """Return the REPORTS entry whose dashboard section matches (e.g. 'B' or 'C'),
+    or None. Used by poller.py to map an on-demand job's section to the report
+    definition it should scrape. Case-insensitive."""
+    want = (section or "").strip().upper()
+    for r in REPORTS:
+        if (r.get("section") or "").strip().upper() == want:
+            return r
+    return None
 
 
 def get_credentials(code):

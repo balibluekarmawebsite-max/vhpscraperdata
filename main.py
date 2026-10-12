@@ -19,6 +19,7 @@ import sys
 
 import config
 from browser import kill_stale_chromedrivers, make_driver_attached
+from runlock import RunLock
 from uploader import UploadError, upload
 from vhp import LoginRequired, ensure_logged_in, scrape_report
 
@@ -160,14 +161,27 @@ def main(argv):
         logger.info("no reports due for cadence=%s — nothing to do", args.cadence)
         return 0
 
-    kill_stale_chromedrivers()  # clear leftover drivers from previous runs
+    # Serialise Chrome access with any on-demand poller run so the two never
+    # kill each other's chromedriver. Poller jobs are short, so this rarely waits;
+    # a dead lock (crashed run) is auto-stolen by RunLock's stale check.
+    lock = RunLock(config.RUN_LOCK_PATH)
+    have_lock = lock.acquire(wait=1800)
+    if not have_lock:
+        logger.warning("run lock still held after waiting — proceeding anyway "
+                       "(an on-demand job may be running)")
 
     total_ok = total_fail = 0
-    for prop in config.PROPERTIES:
-        logger.info("=== %s (%s) ===", prop["name"], prop["code"])
-        ok, fail = run_property(logger, prop, reports)
-        total_ok += ok
-        total_fail += fail
+    try:
+        kill_stale_chromedrivers()  # clear leftover drivers from previous runs
+
+        for prop in config.PROPERTIES:
+            logger.info("=== %s (%s) ===", prop["name"], prop["code"])
+            ok, fail = run_property(logger, prop, reports)
+            total_ok += ok
+            total_fail += fail
+    finally:
+        if have_lock:
+            lock.release()
 
     logger.info("run done: %d ok, %d failed", total_ok, total_fail)
     if total_fail:

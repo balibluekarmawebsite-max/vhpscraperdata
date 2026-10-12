@@ -276,10 +276,20 @@ _JS_SET_INPUT = (
 )
 
 
+def _parse_iso(s):
+    """Parse an ISO 'YYYY-MM-DD' string to a date (for on-demand explicit ranges).
+    Passes a date straight through."""
+    if isinstance(s, datetime.date):
+        return s
+    return datetime.datetime.strptime(str(s).strip(), "%Y-%m-%d").date()
+
+
 def _period_range(report):
     """Return (start_date, end_date) datetime.date for report['period'], or None
     to leave VHP's default untouched.
 
+        {'start': 'YYYY-MM-DD', 'end': 'YYYY-MM-DD'}  -> an EXACT range (used by
+                         on-demand jobs; the end is inclusive, exactly as typed)
         'last_7_days'   -> the 7 days ending today        (today-6 .. today)
         'current_month' -> 1st of this month .. today
         {'days_back': N, 'include_today': bool}  -> custom trailing window
@@ -288,6 +298,9 @@ def _period_range(report):
     today = datetime.date.today()
     p = report.get("period")
     if isinstance(p, dict):
+        # Explicit range wins — an on-demand job set exact dates; honour them as-is.
+        if p.get("start") and p.get("end"):
+            return _parse_iso(p["start"]), _parse_iso(p["end"])
         n = max(1, int(p.get("days_back", 7)))
         end = today if p.get("include_today", True) else today - datetime.timedelta(days=1)
         return end - datetime.timedelta(days=n - 1), end
