@@ -98,6 +98,13 @@ def make_driver_attached(debug_port, download_dir):
     driver = webdriver.Chrome(service=service, options=opts)
     driver.set_page_load_timeout(60)
 
+    # Keep the window wide so the responsive filter panel stays expanded
+    # (a narrow window — e.g. with DevTools docked — collapses it).
+    try:
+        driver.maximize_window()
+    except Exception:  # noqa: BLE001
+        pass
+
     # Send downloads to our folder for this session (the window's own default
     # download dir is left unchanged).
     os.makedirs(download_dir, exist_ok=True)
