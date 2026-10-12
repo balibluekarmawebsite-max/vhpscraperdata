@@ -78,15 +78,26 @@ PROPERTIES = [
 #   cadence  : "daily", "weekly", "monthly", or "both" — which run picks it up.
 #   url      : deep-link to the report page.
 #   period   : how to set the date filter before searching (handled in vhp.py):
-#                "current_month" -> set the Month box to this month
-#                "last_7_days"   -> set the Date range to the previous 7 days
+#                "last_7_days"   -> the 7 days ending today (today-6 .. today)
+#                "current_month" -> 1st of this month .. today
+#                {"days_back": N, "include_today": bool}
+#                                -> trailing N-day window; include_today False
+#                                   ends on yesterday (today-N .. today-1)
 #                None            -> leave VHP's default, just press SEARCH
+#   period_required (optional): True = if the date range can't be set AND
+#                verified, SKIP the report instead of uploading a wrong-period
+#                CSV. Leave OFF until set_period is confirmed for that report.
 REPORTS = [
     {
         "name": "yearly-forecast-of-room-occupancy",
         "cadence": "daily",   # change to "weekly"/"both" here anytime
         "url": "https://e1-vhp.com/fr/report/yearly-forecast-of-room-occupancy",
-        "period": "current_month",
+        # Leave VHP's own default period untouched for now. This is a FORWARD
+        # forecast, so a "current month" (1st..today) range would be the wrong
+        # direction, and its date control hasn't been inspected yet. Report #1
+        # already downloads correctly on the default, so set_period no-ops here.
+        # TODO: inspect this report's date control, then set the right period.
+        "period": None,
         # Filter settings applied before SEARCH (best-effort; see vhp.configure_report):
         "checkboxes": {"Show Revenue": True},
         # Exact VHP option labels to turn OFF in the Segment Code list.

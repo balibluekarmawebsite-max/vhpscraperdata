@@ -285,10 +285,12 @@ def _el_html(driver, el, limit=1600):
 def _find_date_field(driver):
     """The Quasar field (q-field root) whose label is 'Date'. Falls back to any
     field whose shown value looks like a 'dd/mm/yy - dd/mm/yy' range."""
+    # Label equals 'Date' (strip a required-marker '*'); strict equality avoids
+    # matching 'Created Date' / 'Creation Date' on the same page.
     by_label = (
         "//*[contains(@class,'q-field')]"
         "[.//*[contains(@class,'q-field__label')]"
-        "[translate(normalize-space(.),'{lo}','{up}')='DATE']]"
+        "[translate(normalize-space(translate(.,'*','')),'{lo}','{up}')='DATE']]"
     ).format(lo=_LOWER, up=_UPPER)
     for el in driver.find_elements(By.XPATH, by_label):
         if el.is_displayed():
@@ -311,42 +313,112 @@ def _looks_like_range(txt):
     return bool(re.search(r"\d{1,2}/\d{1,2}/\d{2,4}\s*-\s*\d{1,2}/\d{1,2}/\d{2,4}", txt or ""))
 
 
+def _parse_dates(txt):
+    """Every dd/mm/yy(yy) date in txt as a (day, month, 2-digit-year) tuple."""
+    out = []
+    for d, m, y in re.findall(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", txt or ""):
+        out.append((int(d), int(m), int(y) % 100))
+    return out
+
+
 def _date_field_value(driver, field):
-    """The Date field's currently-shown value ('12/10/26 - 12/10/26')."""
-    for css in (".q-field__native input", "input", ".q-field__native", ".ellipsis"):
-        for el in field.find_elements(By.CSS_SELECTOR, css):
+    """The Date field's currently-shown value, e.g. '12/10/26 - 12/10/26'.
+    Aggregates ALL input values first (a two-input from/to field would otherwise
+    expose only the start date, so the end could never verify), then falls back
+    to the control's display text. Fully guarded — a stale field must never raise
+    (set_period is non-fatal)."""
+    try:
+        vals = []
+        for el in field.find_elements(By.CSS_SELECTOR, "input"):
             try:
-                if el.tag_name == "input":
-                    val = el.get_attribute("value")
-                else:
-                    val = el.text or el.get_attribute("textContent")
-                val = (val or "").strip()
-                if val:
-                    return val
+                v = (el.get_attribute("value") or "").strip()
+                if v:
+                    vals.append(v)
             except Exception:  # noqa: BLE001
                 continue
-    return (field.text or "").replace("\n", " ").strip()
+        if vals:
+            return " ".join(vals)
+        for css in (".q-field__native", ".ellipsis"):
+            for el in field.find_elements(By.CSS_SELECTOR, css):
+                try:
+                    txt = (el.text or el.get_attribute("textContent") or "").strip()
+                    if txt:
+                        return txt
+                except Exception:  # noqa: BLE001
+                    continue
+        return (field.text or "").replace("\n", " ").strip()
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _range_matches(shown, start, end):
-    """True if the field's shown value reflects start..end (order-independent,
-    tolerant of spacing). Compares the dd/mm/yy strings as substrings."""
-    s = start.strftime(_VHP_DATE_FMT)
-    e = end.strftime(_VHP_DATE_FMT)
-    shown = (shown or "").replace(" ", "")
-    return s.replace(" ", "") in shown and e.replace(" ", "") in shown
+    """True if the field's shown value reflects start..end. Compares the parsed
+    day/month/year NUMBERS, so it's tolerant of spacing, separator and whether
+    VHP zero-pads ('1/2/26' matches '01/02/26')."""
+    found = set(_parse_dates(shown))
+    want_s = (start.day, start.month, start.year % 100)
+    want_e = (end.day, end.month, end.year % 100)
+    return want_s in found and want_e in found
 
 
-def _field_inputs(field):
-    return [i for i in field.find_elements(By.CSS_SELECTOR, "input")]
+def _visible_inputs(field):
+    out = []
+    try:
+        for i in field.find_elements(By.CSS_SELECTOR, "input"):
+            try:
+                if i.is_displayed():
+                    out.append(i)
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _editable_inputs(field):
+    """Visible inputs that are NOT readonly/disabled (so typing can work). A
+    Quasar range field is usually readonly -> this is empty -> use the calendar."""
+    out = []
+    for i in _visible_inputs(field):
+        try:
+            if not i.get_attribute("readonly") and not i.get_attribute("disabled"):
+                out.append(i)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _wait_css(driver, css, timeout):
+    """True once any element matching css is visible, within timeout seconds."""
+    end = time.time() + timeout
+    while time.time() < end:
+        for el in driver.find_elements(By.CSS_SELECTOR, css):
+            try:
+                if el.is_displayed():
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        time.sleep(0.15)
+    return False
+
+
+def _close_overlays(driver):
+    """Dismiss any open Quasar popup/calendar so a leftover overlay can't block
+    configure_report or SEARCH. ESC twice (popup + its proxy)."""
+    for _ in range(2):
+        try:
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.25)
 
 
 def _try_type_range(driver, field, start, end):
-    """Type the range into the field's input(s): one combined input, or two
-    separate from/to inputs. Best-effort; returns True if it entered text."""
+    """Type the range into an EDITABLE input (skips readonly calendar-only
+    fields). Commits with TAB, never ENTER (ENTER can submit SEARCH early)."""
     s = start.strftime(_VHP_DATE_FMT)
     e = end.strftime(_VHP_DATE_FMT)
-    inputs = [i for i in _field_inputs(field) if i.is_displayed()]
+    inputs = _editable_inputs(field)
     if not inputs:
         return False
 
@@ -368,9 +440,6 @@ def _try_type_range(driver, field, start, end):
             _fill(inputs[1], e)
         else:
             _fill(inputs[0], "{} - {}".format(s, e))
-        # Commit the typed value with TAB (blurs the field) rather than ENTER —
-        # ENTER can submit the filter / trigger SEARCH before configure_report
-        # has set Show Revenue and the Segment Code untick.
         inputs[-1].send_keys(Keys.TAB)
     except Exception:  # noqa: BLE001
         return False
@@ -378,11 +447,146 @@ def _try_type_range(driver, field, start, end):
     return True
 
 
+# --- QDate calendar-popup driver (the reliable path for a readonly range) ----
+def _open_date_popup(driver, field):
+    """Click the field's calendar icon (or the control) to open the QDate popup;
+    return the visible .q-date element, or None."""
+    openers = []
+    for css in (".q-field__append .q-icon", ".q-field__append",
+                ".q-field__control", ".q-field__native"):
+        try:
+            openers.extend(field.find_elements(By.CSS_SELECTOR, css))
+        except Exception:  # noqa: BLE001
+            continue
+    openers.append(field)
+    for op in openers:
+        try:
+            if not op.is_displayed():
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        _safe_click(driver, op)
+        end = time.time() + 3
+        while time.time() < end:
+            for d in driver.find_elements(By.CSS_SELECTOR, ".q-date"):
+                try:
+                    if d.is_displayed():
+                        return d
+                except Exception:  # noqa: BLE001
+                    continue
+            time.sleep(0.2)
+    return None
+
+
+def _qdate_nav_text_buttons(driver):
+    """The text buttons in the QDate navigation bar, in order [month, year]
+    (chevrons carry an icon and no text, so they're filtered out)."""
+    seen, out = set(), []
+    for b in driver.find_elements(
+            By.CSS_SELECTOR, ".q-date__navigation .q-btn, .q-date__navigation button"):
+        try:
+            if b.is_displayed() and (b.text or "").strip() and b.id not in seen:
+                seen.add(b.id)
+                out.append(b)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _click_text_item(driver, css, text):
+    """Click a view item (year/month cell) whose text equals `text`, scrolling
+    the scrollable view a few times if it's not rendered yet."""
+    for _ in range(14):
+        for el in driver.find_elements(By.CSS_SELECTOR, css):
+            try:
+                if el.is_displayed() and (el.text or "").strip() == text:
+                    _safe_click(driver, el)
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        driver.execute_script(
+            "var m=document.querySelector('.q-date__years, .q-date__months, .q-date__view');"
+            "if(m){m.scrollTop=m.scrollTop+160;}")
+        time.sleep(0.15)
+    return False
+
+
+def _qdate_goto(driver, year, month):
+    """Navigate the open QDate to (year, month) using the year/month picker views
+    — locale-independent: year chosen by its number, month by its position."""
+    navs = _qdate_nav_text_buttons(driver)
+    opened = False
+    if len(navs) >= 2:
+        _safe_click(driver, navs[1])  # the year label
+        opened = _wait_css(driver, ".q-date__years", 1.5)
+    if not opened:  # fallback: the header year subtitle also opens the years view
+        for sub in driver.find_elements(By.CSS_SELECTOR, ".q-date__header-subtitle"):
+            try:
+                if sub.is_displayed():
+                    _safe_click(driver, sub)
+                    opened = _wait_css(driver, ".q-date__years", 1.5)
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+    if opened:
+        _click_text_item(driver, ".q-date__years-item .q-btn, .q-date__years-item, "
+                                  ".q-date__years button", str(year))
+        time.sleep(0.4)
+
+    navs = _qdate_nav_text_buttons(driver)
+    if navs:
+        _safe_click(driver, navs[0])  # the month label
+        if _wait_css(driver, ".q-date__months", 1.5):
+            items = []
+            for m in driver.find_elements(
+                    By.CSS_SELECTOR, ".q-date__months-item, .q-date__months button"):
+                try:
+                    if m.is_displayed():
+                        items.append(m)
+                except Exception:  # noqa: BLE001
+                    continue
+            if 1 <= month <= len(items):
+                _safe_click(driver, items[month - 1])
+                time.sleep(0.4)
+
+
+def _click_qday(driver, day):
+    """Click the IN-month day cell with the given number (never an --out
+    spillover cell from the adjacent month, which shares day numbers)."""
+    want = str(int(day))
+    for css in (".q-date__calendar-item--in button", ".q-date__calendar-item--in"):
+        for el in driver.find_elements(By.CSS_SELECTOR, css):
+            try:
+                if el.is_displayed() and (el.text or "").strip() == want:
+                    _safe_click(driver, el)
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False
+
+
+def _try_calendar_range(driver, field, start, end):
+    """Drive the QDate popup to select start..end (QDate range mode = two day
+    clicks). Dumps the popup HTML once so a miss is fixable in one round-trip."""
+    popup = _open_date_popup(driver, field)
+    if popup is None:
+        print("    (period) calendar popup did not open")
+        return False
+    print("    (period) QDate popup HTML: {}".format(_el_html(driver, popup, 2400)))
+    for label, d in (("start", start), ("end", end)):
+        _qdate_goto(driver, d.year, d.month)
+        if not _click_qday(driver, d.day):
+            print("    (period) calendar: could not click {} day {}".format(label, d.day))
+    _close_overlays(driver)
+    return True
+
+
 def _try_js_set_range(driver, field, start, end):
-    """Set the input value(s) via the native setter + Vue events."""
+    """Last resort: set VISIBLE input value(s) via the native setter + Vue events.
+    Unreliable for a {from,to} range model, so only ever trusted via read-back."""
     s = start.strftime(_VHP_DATE_FMT)
     e = end.strftime(_VHP_DATE_FMT)
-    inputs = _field_inputs(field)
+    inputs = _visible_inputs(field)
     if not inputs:
         return False
     try:
@@ -397,46 +601,119 @@ def _try_js_set_range(driver, field, start, end):
     return True
 
 
+def _wait_date_field(driver, timeout=15):
+    """Poll for the 'Date' field to render (the Quasar filter panel can hydrate
+    AFTER the SEARCH button that open_report waits on). Returns the field or None."""
+    end = time.time() + timeout
+    while time.time() < end:
+        f = _find_date_field(driver)
+        if f is not None:
+            return f
+        time.sleep(0.5)
+    return None
+
+
+def _field_labels(driver):
+    """Every visible q-field label on the page — printed when the 'Date' field
+    isn't found, so the right control (e.g. a 'Month' picker) is identifiable."""
+    out = []
+    for el in driver.find_elements(By.CSS_SELECTOR, ".q-field__label"):
+        try:
+            if el.is_displayed():
+                t = (el.text or "").strip()
+                if t:
+                    out.append(t)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _inputs_summary(field):
+    """Readable summary of the field's visible inputs (readonly? placeholder?),
+    so typeable-vs-calendar-only is clear from one run's log."""
+    parts = []
+    for i in _visible_inputs(field):
+        try:
+            ro = "readonly" if i.get_attribute("readonly") else "editable"
+            ph = (i.get_attribute("placeholder") or "")[:24]
+            parts.append("[{} ph={!r}]".format(ro, ph))
+        except Exception:  # noqa: BLE001
+            continue
+    if not parts:
+        return "0 visible inputs (calendar-only — will use the QDate popup)"
+    return "{} input(s): {}".format(len(parts), " ".join(parts))
+
+
 def set_period(driver, report):
     """Set the report's Date filter before SEARCH (e.g. the last 7 days for the
-    weekly reservation report).
+    weekly reservation report). NON-FATAL wrapper: any error is swallowed (we
+    leave VHP's default and carry on) and overlays are cleaned up."""
+    try:
+        return _set_period_inner(driver, report)
+    except Exception as exc:  # noqa: BLE001 - must never abort the scrape
+        print("    (period) error (ignored, leaving VHP default): {}".format(_describe(exc)))
+        try:
+            _close_overlays(driver)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
 
-    Self-diagnosing and NON-FATAL: it prints the Date field's HTML and its value
-    before/after so a miss is debuggable, tries typing then a JS value-set, then
-    verifies by reading the field back. Returns True if the shown range matches
-    what we wanted, else False (the scrape still continues). Reports with no Date
-    field (period None, or no such control) are a no-op.
-    """
-    rng = _period_range(report)
+
+def _set_period_inner(driver, report):
+    """Self-diagnosing date setter: prints the Date field HTML + before/after
+    values, then tries (1) typing into an editable input, (2) driving the QDate
+    calendar popup, (3) a JS value-set, verifying each by reading the field back.
+    Returns True once the shown range matches. Reports with no Date field (period
+    None, or no such control) are a safe no-op."""
+    try:
+        rng = _period_range(report)
+    except Exception as exc:  # noqa: BLE001 - bad period config must not abort
+        print("    (period) bad period config {!r}: {}".format(report.get("period"), _describe(exc)))
+        return False
     if rng is None:
         return True  # nothing to set for this report
     start, end = rng
     want = "{} - {}".format(start.strftime(_VHP_DATE_FMT), end.strftime(_VHP_DATE_FMT))
 
-    field = _find_date_field(driver)
+    field = _wait_date_field(driver, 15)
     if field is None:
-        print("    (period) no 'Date' field found — leaving VHP default")
+        print("    (period) no 'Date' field found (waited 15s). Visible field labels: {}"
+              .format(", ".join(_field_labels(driver)) or "(none)"))
         return False
 
     before = _date_field_value(driver, field)
     print("    (period) want {} | field now shows: {}".format(want, before or "(blank)"))
+    print("    (period) inputs: {}".format(_inputs_summary(field)))
     print("    (period) field HTML: {}".format(_el_html(driver, field)))
 
-    for name, fn in (("type", _try_type_range), ("js-set", _try_js_set_range)):
+    def _shown():
+        time.sleep(0.4)  # let Quasar re-render before trusting a read-back
+        return _date_field_value(driver, _find_date_field(driver) or field)
+
+    strategies = (
+        ("type", _try_type_range),       # works only on an editable input
+        ("calendar", _try_calendar_range),  # the reliable path for a readonly range
+        ("js-set", _try_js_set_range),    # last resort
+    )
+    for name, fn in strategies:
+        field = _find_date_field(driver) or field  # re-find: a prior strategy may have re-rendered
         try:
             fn(driver, field, start, end)
         except Exception as exc:  # noqa: BLE001
             print("    (period) {} strategy error: {}".format(name, _describe(exc)))
+            _close_overlays(driver)
             continue
-        shown = _date_field_value(driver, _find_date_field(driver) or field)
+        shown = _shown()
         if _range_matches(shown, start, end):
             print("    (period) set to {} via {} (field shows: {})".format(want, name, shown))
+            _close_overlays(driver)
             return True
         print("    (period) after {}: field shows {} (not yet {})".format(name, shown or "(blank)", want))
+        _close_overlays(driver)
 
     final = _date_field_value(driver, _find_date_field(driver) or field)
-    print("    (period) WARNING could not set range — field shows {} (wanted {}). "
-          "CSV will use that range; send me the 'field HTML' line above to fix.".format(
+    print("    (period) WARNING could not set range — field shows {} (wanted {}). Send me "
+          "the 'field HTML' and 'QDate popup HTML' lines above and I'll finish it.".format(
               final or "(blank)", want))
     return False
 
@@ -789,7 +1066,15 @@ def scrape_report(driver, prop, report, download_dir):
             raise RuntimeError("[{}] {}".format(name, _describe(exc)))
 
     step("open report", lambda: open_report(driver, report))
-    set_period(driver, report)  # best-effort date filter (non-fatal; prints)
+    period_ok = set_period(driver, report)  # best-effort date filter (non-fatal; prints)
+    if report.get("period_required") and not period_ok:
+        # Opt-in safety gate (default OFF). Once set_period is confirmed working
+        # for a report, set "period_required": True in config so a date range
+        # that can't be set AND verified SKIPS the report instead of exporting a
+        # CSV with VHP's default (wrong) window — i.e. never upload bad data.
+        raise RuntimeError(
+            "[set period] required date range not set/verified — skipping report "
+            "to avoid wrong-period data")
     configure_report(driver, report)  # best-effort filter settings (non-fatal)
     step("click SEARCH", lambda: click_search(driver))
     step("wait for data", lambda: wait_for_report_data(driver))
