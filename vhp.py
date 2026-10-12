@@ -545,22 +545,67 @@ def _try_type_range(driver, field, start, end):
 
 
 # --- QDate calendar-popup driver (the reliable path for a readonly range) ----
-def _first_visible_popup(driver):
-    """First visible floating popup (date/menu/dialog), whatever its class."""
-    for css in (".q-date", ".q-menu", ".q-dialog"):
-        for p in driver.find_elements(By.CSS_SELECTOR, css):
-            try:
-                if p.is_displayed():
-                    return p
-            except Exception:  # noqa: BLE001
-                continue
-    return None
+_MARK_ALL_JS = (
+    "document.querySelectorAll('*').forEach("
+    "function(e){e.setAttribute('data-vhp-seen','1');});"
+)
+
+# Returns the ROOT elements of any newly-added, reasonably-sized visible subtree
+# (a popup/calendar portals in as new DOM). Skips tiny ripples/tooltips.
+_NEW_ROOTS_JS = r"""
+var roots=[], all=document.querySelectorAll('*');
+for (var i=0;i<all.length;i++){
+  var e=all[i];
+  if(e.hasAttribute('data-vhp-seen')) continue;
+  var p=e.parentElement;
+  if(p && !p.hasAttribute('data-vhp-seen')) continue;  // only the top of a new subtree
+  var r=e.getBoundingClientRect();
+  if(r.width<40 || r.height<40) continue;              // skip ripples/tooltips
+  roots.push(e);
+}
+return roots;
+"""
+
+# Fire the events a custom picker might open on (not just a plain click).
+_FIRE_OPEN_JS = (
+    "var e=arguments[0];"
+    "try{e.focus();}catch(_){}"
+    "['pointerdown','mousedown','mouseup','click'].forEach(function(t){"
+    "try{e.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));}"
+    "catch(_){}});"
+)
 
 
-def _open_date_popup(driver, field):
-    """Click the calendar icon / control / input to open the date popup. Returns
-    the first visible popup (.q-date, .q-menu or .q-dialog), or None — broadened
-    beyond .q-date because VHP's date-input may use a custom popup."""
+def _largest(els):
+    """The biggest element by area (the popup, vs incidental new nodes)."""
+    best, area = None, -1
+    for e in els:
+        try:
+            s = e.size
+            a = s["width"] * s["height"]
+            if a > area:
+                best, area = e, a
+        except Exception:  # noqa: BLE001
+            continue
+    return best or (els[0] if els else None)
+
+
+def _new_visible_roots(driver):
+    try:
+        return driver.execute_script(_NEW_ROOTS_JS) or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _open_and_capture_popup(driver, field):
+    """Open the date popup by a DOM diff: mark the whole page, then click (and,
+    if needed, fire pointer/mouse/focus events on) the calendar icon / control /
+    input / field, and capture whatever NEW element appears — robust to the
+    popup's class names. Returns (popup_element_or_None, dump_string)."""
+    try:
+        driver.execute_script(_MARK_ALL_JS)
+    except Exception:  # noqa: BLE001
+        pass
     openers = []
     for css in (".q-field__append .q-icon", "i.mdi-calendar", ".q-field__append",
                 ".q-field__control", ".q-field__native", "input"):
@@ -577,33 +622,19 @@ def _open_date_popup(driver, field):
         except Exception:  # noqa: BLE001
             continue
         _safe_click(driver, op)
-        end = time.time() + 2.5
-        while time.time() < end:
-            pop = _first_visible_popup(driver)
-            if pop is not None:
-                return pop
-            time.sleep(0.2)
-    return None
-
-
-def _dump_popups(driver):
-    """JS dump of any visible popup/calendar/dialog so an unknown date popup's
-    structure is captured in one run."""
-    js = r"""
-    var sel='.q-date,.q-menu,.q-dialog,[class*="picker"],[class*="calendar"],[class*="popup"]';
-    var els=document.querySelectorAll(sel), out=[];
-    for (var i=0;i<els.length;i++){
-      var e=els[i], r=e.getBoundingClientRect();
-      if (r.width===0 && r.height===0) continue;
-      out.push('<'+e.tagName+' class='+JSON.stringify((e.className||'').slice(0,100))+'> '+
-               (e.outerHTML||'').replace(/\s+/g,' ').slice(0,1500));
-    }
-    return out.length ? out.join('\n   --- ') : '(no visible popup elements)';
-    """
-    try:
-        return driver.execute_script(js)
-    except Exception as exc:  # noqa: BLE001
-        return "(popup diag failed: {})".format(_describe(exc))
+        time.sleep(1.0)
+        roots = _new_visible_roots(driver)
+        if not roots:  # retry with explicit pointer/mouse/focus events
+            try:
+                driver.execute_script(_FIRE_OPEN_JS, op)
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(1.0)
+            roots = _new_visible_roots(driver)
+        if roots:
+            dump = "\n   --- ".join(_el_html(driver, r, 1700) for r in roots[:4])
+            return _largest(roots), dump
+    return None, "(nothing new appeared after clicking the icon/control/input/field)"
 
 
 def _qdate_nav_text_buttons(driver):
@@ -696,16 +727,15 @@ def _click_qday(driver, day):
 def _try_calendar_range(driver, field, start, end):
     """Drive the QDate popup to select start..end (QDate range mode = two day
     clicks). Dumps the popup HTML once so a miss is fixable in one round-trip."""
-    popup = _open_date_popup(driver, field)
-    print("    (period) popups after open: {}".format(_dump_popups(driver)))
+    popup, dump = _open_and_capture_popup(driver, field)
+    print("    (period) popup opened on click: {}".format(dump))
     if popup is None:
-        print("    (period) calendar popup did not open")
         _close_overlays(driver)
         return False
     for label, d in (("start", start), ("end", end)):
         _qdate_goto(driver, d.year, d.month)
         if not _click_qday(driver, d.day):
-            print("    (period) calendar: could not click {} day {}".format(label, d.day))
+            print("    (period) could not click {} day {}".format(label, d.day))
     _close_overlays(driver)
     return True
 
