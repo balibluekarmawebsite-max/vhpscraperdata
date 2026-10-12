@@ -255,6 +255,16 @@ def configure_report(driver, report):
 
     Never raises — it prints what it did (or couldn't) and the scrape carries on.
     """
+    if not (report.get("checkboxes") or report.get("segment_untick")):
+        return
+    # Wait for the left filter panel to render (it can lag behind SEARCH).
+    end = time.time() + 20
+    while time.time() < end:
+        if driver.find_elements(By.CSS_SELECTOR, "[data-cy='{}']".format(_SEGMENT_CY)) or \
+                driver.find_elements(By.XPATH, "//*[contains(@class,'q-checkbox')]"):
+            break
+        time.sleep(0.5)
+
     for label, want in (report.get("checkboxes") or {}).items():
         try:
             changed = _set_checkbox(driver, label, bool(want))
@@ -266,7 +276,7 @@ def configure_report(driver, report):
     labels = report.get("segment_untick") or []
     if labels:
         try:
-            _multiselect_untick(driver, "Segment Code", labels)
+            _segment_untick(driver, labels)
         except Exception as exc:  # noqa: BLE001
             print("    (config) Segment Code untick {}: {}".format(labels, _describe(exc)))
 
@@ -291,39 +301,55 @@ def _set_checkbox(driver, label, want):
     return True
 
 
-def _multiselect_untick(driver, field_label, option_labels):
-    """Open a Quasar multi-select (by its field label) and turn OFF the given
-    options. The list opens with everything selected (the report's fresh
-    default), so each option is clicked ONCE to de-select it — we don't rely on
-    reading a checked-state attribute (that proved unreliable for this control).
-    """
-    select = None
-    for el in driver.find_elements(
-        By.XPATH,
-        "//*[contains({ci}, {lbl})]/following::*[contains(@class,'q-select')][1]".format(
-            ci=_ci("."), lbl=repr(field_label.upper())
-        ),
-    ):
-        if el.is_displayed():
-            select = el
-            break
-    if select is None:
-        raise RuntimeError("{!r} control not found".format(field_label))
+_SEGMENT_CY = "dropdown-segment-code"
 
-    _safe_click(driver, select)  # open the dropdown
+
+def _segment_value(driver):
+    """The Segment Code field's shown value (e.g. 'ALL' or 'FIT, FIT-OTA, …')."""
+    for css in (
+        "[data-cy='{}'] .ellipsis".format(_SEGMENT_CY),
+        "[data-cy='{}']".format(_SEGMENT_CY),
+    ):
+        for el in driver.find_elements(By.CSS_SELECTOR, css):
+            if el.is_displayed():
+                txt = (el.text or el.get_attribute("textContent") or "").strip()
+                if txt:
+                    return txt
+    return ""
+
+
+def _segment_untick(driver, exclude_labels):
+    """Set Segment Code to everything EXCEPT the given option labels.
+
+    Opens the data-cy='dropdown-segment-code' multi-select, makes sure all are
+    selected (deterministic start), then de-selects each excluded option. The
+    list is virtually scrolled, so options are found by scrolling the menu.
+    """
+    field = None
+    for el in driver.find_elements(By.CSS_SELECTOR, "[data-cy='{}']".format(_SEGMENT_CY)):
+        if el.is_displayed():
+            field = el
+            break
+    if field is None:
+        raise RuntimeError("Segment Code field (data-cy) not found")
+
+    _safe_click(driver, field)  # open the dropdown
     time.sleep(1.0)
-    for opt in option_labels:
-        el = _find_option(driver, opt)
-        if el is None:
-            print("    (config) Segment Code: {!r} not found in list".format(opt))
+
+    # Deterministic start: make sure everything is selected.
+    if _segment_value(driver).upper() != "ALL":
+        allopt = _find_option(driver, "All")
+        if allopt is not None:
+            _safe_click(driver, allopt)
+            time.sleep(0.7)
+
+    for lbl in exclude_labels:
+        item = _find_option(driver, lbl)
+        if item is None:
+            print("    (config) Segment Code: {!r} not found".format(lbl))
             continue
-        try:
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(0.2)
-        _safe_click(driver, el)
-        print("    (config) Segment Code: de-selected {!r}".format(opt))
+        _safe_click(driver, item)
+        print("    (config) Segment Code: de-selected {!r}".format(lbl))
         time.sleep(0.4)
 
     try:  # close the dropdown so it doesn't block SEARCH
@@ -331,34 +357,37 @@ def _multiselect_untick(driver, field_label, option_labels):
     except Exception:  # noqa: BLE001
         pass
     time.sleep(0.4)
-    try:  # report the resulting value so we can see it worked (no longer "ALL")
-        val = (select.text or select.get_attribute("textContent") or "").strip()
-        print("    (config) Segment Code now shows: {}".format((val or "(blank)")[:70]))
-    except Exception:  # noqa: BLE001
-        pass
+    print("    (config) Segment Code now shows: {}".format(_segment_value(driver)[:70] or "(blank)"))
 
 
 def _find_option(driver, label):
-    """Find a visible dropdown option by label, scrolling the open menu if it
-    isn't rendered yet. Returns the clickable row element or None."""
-    xps = [
-        "//*[contains(@class,'q-item')][contains({ci}, {l})]",
-        "//*[self::div or self::span or self::label][not(*)][contains({ci}, {l})]",
-    ]
-    for _ in range(8):
-        for xp in xps:
-            x = xp.format(ci=_ci("."), l=repr(label.upper()))
-            for el in driver.find_elements(By.XPATH, x):
-                if el.is_displayed():
-                    return el
-        try:  # scroll the open dropdown/menu and retry
-            driver.execute_script(
-                "var m=document.querySelector('.q-menu, [role=listbox], "
-                ".q-virtual-scroll, .scroll'); if(m){m.scrollTop += 250;}"
-            )
+    """Find a dropdown option whose q-item label EXACTLY equals `label`,
+    scrolling the virtually-scrolled menu until it renders. Returns the
+    clickable q-item row, or None."""
+    want = label.upper()
+    xp = (
+        "//div[contains(@class,'q-item')]"
+        "[.//div[contains(@class,'q-item__label')]"
+        "[translate(normalize-space(.),'{lo}','{up}')={w!r}]]"
+    ).format(lo=_LOWER, up=_UPPER, w=want)
+    last = -1.0
+    for _ in range(40):
+        for el in driver.find_elements(By.XPATH, xp):
+            if el.is_displayed():
+                return el
+        moved = driver.execute_script(
+            "var m=document.querySelector('.q-menu .scroll, .q-menu .q-virtual-scroll,"
+            " .q-virtual-scroll, .q-menu'); if(!m){return -1;}"
+            " var b=m.scrollTop; m.scrollTop=b+200; return m.scrollTop;"
+        )
+        try:
+            moved = float(moved)
         except Exception:  # noqa: BLE001
-            pass
-        time.sleep(0.35)
+            moved = -1.0
+        time.sleep(0.25)
+        if moved == last:  # scroll didn't advance -> reached the end
+            break
+        last = moved
     return None
 
 
