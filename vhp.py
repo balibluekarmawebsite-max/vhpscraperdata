@@ -292,8 +292,11 @@ def _set_checkbox(driver, label, want):
 
 
 def _multiselect_untick(driver, field_label, option_labels):
-    """Open a Quasar multi-select (found by its field label) and de-select the
-    given option labels if they are currently selected."""
+    """Open a Quasar multi-select (by its field label) and turn OFF the given
+    options. The list opens with everything selected (the report's fresh
+    default), so each option is clicked ONCE to de-select it — we don't rely on
+    reading a checked-state attribute (that proved unreliable for this control).
+    """
     select = None
     for el in driver.find_elements(
         By.XPATH,
@@ -308,32 +311,55 @@ def _multiselect_untick(driver, field_label, option_labels):
         raise RuntimeError("{!r} control not found".format(field_label))
 
     _safe_click(driver, select)  # open the dropdown
-    time.sleep(0.9)
+    time.sleep(1.0)
     for opt in option_labels:
-        hit = None
-        for item in driver.find_elements(
-            By.XPATH,
-            "//*[contains(@class,'q-item')][contains({}, {!r})]".format(_ci("."), opt.upper()),
-        ):
-            if item.is_displayed():
-                hit = item
-                break
-        if hit is None:
-            print("    (config) Segment Code: option {!r} not shown".format(opt))
+        el = _find_option(driver, opt)
+        if el is None:
+            print("    (config) Segment Code: {!r} not found in list".format(opt))
             continue
-        selected = (hit.get_attribute("aria-selected") or "").lower() == "true"
-        if selected:
-            _safe_click(driver, hit)
-            print("    (config) Segment Code: unticked {!r}".format(opt))
-            time.sleep(0.3)
-        else:
-            print("    (config) Segment Code: {!r} already off".format(opt))
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.2)
+        _safe_click(driver, el)
+        print("    (config) Segment Code: de-selected {!r}".format(opt))
+        time.sleep(0.4)
 
     try:  # close the dropdown so it doesn't block SEARCH
         driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
     except Exception:  # noqa: BLE001
         pass
     time.sleep(0.4)
+    try:  # report the resulting value so we can see it worked (no longer "ALL")
+        val = (select.text or select.get_attribute("textContent") or "").strip()
+        print("    (config) Segment Code now shows: {}".format((val or "(blank)")[:70]))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _find_option(driver, label):
+    """Find a visible dropdown option by label, scrolling the open menu if it
+    isn't rendered yet. Returns the clickable row element or None."""
+    xps = [
+        "//*[contains(@class,'q-item')][contains({ci}, {l})]",
+        "//*[self::div or self::span or self::label][not(*)][contains({ci}, {l})]",
+    ]
+    for _ in range(8):
+        for xp in xps:
+            x = xp.format(ci=_ci("."), l=repr(label.upper()))
+            for el in driver.find_elements(By.XPATH, x):
+                if el.is_displayed():
+                    return el
+        try:  # scroll the open dropdown/menu and retry
+            driver.execute_script(
+                "var m=document.querySelector('.q-menu, [role=listbox], "
+                ".q-virtual-scroll, .scroll'); if(m){m.scrollTop += 250;}"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.35)
+    return None
 
 
 def click_search(driver):
