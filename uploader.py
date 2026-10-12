@@ -79,8 +79,19 @@ def upload(path, property_code, report, cfg=None, today=None):
 
     backoffs = cfg.get("retry_backoffs", [2, 4, 8, 16])
     attempt = 0
+    timings = []  # per-attempt "status in Ns" — shows fast-crash vs slow-timeout
+
+    def _retry_or_raise(msg, status=None):
+        """Sleep + continue if we still have retries, else raise UploadError."""
+        if attempt <= len(backoffs):
+            time.sleep(backoffs[attempt - 1])
+            return True
+        raise UploadError("{} after {} attempt(s) [{}]".format(
+            msg, attempt, ", ".join(timings)), status=status)
+
     while True:
         attempt += 1
+        t0 = time.time()
         try:
             with open(path, "rb") as fh:
                 resp = requests.post(
@@ -90,39 +101,46 @@ def upload(path, property_code, report, cfg=None, today=None):
                     files={"file": (os.path.basename(path), fh, "text/csv")},
                     timeout=cfg.get("timeout", 180),
                 )
-        except requests.RequestException as exc:  # network / timeout -> retryable
-            if attempt <= len(backoffs):
-                time.sleep(backoffs[attempt - 1])
+        except requests.RequestException as exc:  # network / client timeout
+            timings.append("net-err {:.1f}s".format(time.time() - t0))
+            if _retry_or_raise("network error ({})".format(exc)):
                 continue
-            raise UploadError("network error after {} attempts: {}".format(attempt, exc))
 
-        if 200 <= resp.status_code < 300:
+        elapsed = time.time() - t0
+        status = resp.status_code
+        timings.append("{} {:.1f}s".format(status, elapsed))
+
+        if 200 <= status < 300:
             try:
                 body = resp.json()
             except ValueError:
                 body = None
-            # A real import returns JSON with "ok": true. A 2xx with an HTML body
-            # (the Next.js app shell) means the request hit the web app, NOT the
-            # /api/import handler — that is NEVER a successful push, so fail loudly
-            # instead of silently reporting success and losing the data.
-            if not isinstance(body, dict) or not body.get("ok"):
-                ctype = resp.headers.get("content-type", "")
-                snippet = (resp.text or "")[:160].replace("\n", " ").replace("\r", " ")
-                raise UploadError(
-                    "got a {} but not the API's JSON (content-type {!r}) — the "
-                    "request likely hit the web app, not /api/import. First bytes: {}"
-                    .format(resp.status_code, ctype, snippet),
-                    status=resp.status_code)
-            body["_status"] = resp.status_code
-            return body
+            if isinstance(body, dict) and body.get("ok"):
+                body["_status"] = status
+                body["_timings"] = timings
+                return body
+            # 2xx but NOT the API's JSON (e.g. the Next.js app shell on a cold
+            # start right after a server restart). Treat as transient and retry;
+            # the next (warm) request returns real JSON. Only fail if it never
+            # does — so a genuine misroute isn't hidden, and data is never lost.
+            ctype = resp.headers.get("content-type", "")
+            snippet = (resp.text or "")[:140].replace("\n", " ").replace("\r", " ")
+            if _retry_or_raise(
+                    "got {} but not the API's JSON (content-type {!r}; likely the "
+                    "web app / cold start, not /api/import JSON). First bytes: {}"
+                    .format(status, ctype, snippet),
+                    status=status):
+                continue
 
+        # Non-2xx. Retry transient (429/5xx/network); hard-fail the rest.
         detail = _error_detail(resp)
-        if resp.status_code in _RETRY_STATUS and attempt <= len(backoffs):
-            time.sleep(backoffs[attempt - 1])
-            continue
+        if status in _RETRY_STATUS:
+            if _retry_or_raise("HTTP {} from dashboard ({})".format(status, detail),
+                               status=status):
+                continue
         raise UploadError(
-            "HTTP {} from dashboard: {}".format(resp.status_code, detail),
-            status=resp.status_code)
+            "HTTP {} from dashboard: {} [{}]".format(status, detail, ", ".join(timings)),
+            status=status)
 
 
 def _error_detail(resp):
