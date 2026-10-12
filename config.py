@@ -89,7 +89,9 @@ REPORTS = [
         "period": "current_month",
         # Filter settings applied before SEARCH (best-effort; see vhp.configure_report):
         "checkboxes": {"Show Revenue": True},
-        "segment_untick": ["Complimentary", "House Use"],
+        # Segment Code automation temporarily OFF — it misbehaved and reset the
+        # filter to ALL. Re-enable once the dropdown selectors are corrected.
+        "segment_untick": [],
     },
     {
         "name": "reservation-by-creation-date",
