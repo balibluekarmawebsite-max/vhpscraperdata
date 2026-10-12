@@ -19,7 +19,7 @@ import sys
 
 import config
 from browser import kill_stale_chromedrivers, make_driver_attached
-from uploader import upload
+from uploader import UploadError, upload
 from vhp import LoginRequired, ensure_logged_in, scrape_report
 
 VALID_CADENCES = ("daily", "weekly", "both")
@@ -108,14 +108,22 @@ def run_property(logger, prop, reports):
             try:
                 path = scrape_report(driver, prop, report, config.DOWNLOADS_DIR)
                 logger.info("[%s] downloaded -> %s", tag, path)
-                status = upload(path, prop["code"], report["name"])
-                logger.info("[%s] uploaded (HTTP %s)", tag, status)
+                result = upload(path, prop["code"], report)
+                logger.info("[%s] uploaded -> section %s, week %s (%s)",
+                            tag, report.get("section"), result.get("week_ending"),
+                            result.get("message") or "HTTP {}".format(result.get("_status")))
                 ok += 1
             except LoginRequired:
                 logger.error("[%s] session dropped — log into its VHP window again",
                              prop["code"])
                 fail = len(reports) - ok  # this + remaining reports can't run
                 break
+            except UploadError as exc:
+                # Downloaded fine but the dashboard rejected/failed the push. The
+                # CSV is safe on disk; log loudly (a human may need to act, e.g.
+                # 409 locked week, 422 unreadable file, 401 bad token).
+                fail += 1
+                logger.error("[%s] downloaded OK but UPLOAD FAILED: %s", tag, exc)
             except Exception as exc:  # noqa: BLE001 - isolate per-report failures
                 fail += 1
                 logger.exception("[%s] FAILED: %s", tag, exc)

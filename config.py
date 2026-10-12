@@ -92,6 +92,9 @@ REPORTS = [
         "name": "yearly-forecast-of-room-occupancy",
         "cadence": "daily",   # change to "weekly"/"both" here anytime
         "url": "https://e1-vhp.com/fr/report/yearly-forecast-of-room-occupancy",
+        # Dashboard import: section B (monthly ACTUALS only; never budget/LY).
+        "section": "B",
+        "source": "vhp:yearly-forecast",
         # Leave VHP's own default period untouched for now. This is a FORWARD
         # forecast, so a "current month" (1st..today) range would be the wrong
         # direction, and its date control hasn't been inspected yet. Report #1
@@ -111,6 +114,9 @@ REPORTS = [
         # Thursday — the 7 full days ending the day before the run (yesterday).
         # (days_back=7, include_today=False -> today-7 .. today-1.)
         "period": {"days_back": 7, "include_today": False},
+        # Dashboard import: section C (full replace of that week's segment rows).
+        "section": "C",
+        "source": "vhp:reservation-by-creation-date",
         # Verified working (V-Calendar date picker). Gate ON: if the date range
         # can't be set AND verified, SKIP this report rather than upload a CSV
         # with VHP's default (wrong) window.
@@ -127,11 +133,15 @@ REPORTS = [
 # TODO: confirm the exact endpoint path + form field name from the dashboard
 # repo. If the endpoint needs auth, put the bearer token in the VHP_UPLOAD_TOKEN
 # environment variable (preferred) or paste it into `token` below.
+# Dashboard import API (see VHP_INTEGRATION.md). The scraper POSTs each file to
+# /api/import with property + section + week_ending; the dashboard's AI extracts
+# it. Put the shared secret in the IMPORT_API_TOKEN environment variable — never
+# commit it. (uploader.py sends field name "file" and hard-codes the contract.)
 UPLOAD = {
-    "url": "https://analytics.bluekarmasecrets.com/api/upload",
-    "field": "file",
-    "token": os.environ.get("VHP_UPLOAD_TOKEN", ""),
-    "timeout": 120,
+    "url": "https://dashboard.bluekarmasecrets.com/api/import",
+    "token": os.environ.get("IMPORT_API_TOKEN", ""),
+    "timeout": 180,
+    "retry_backoffs": [2, 4, 8, 16],  # seconds; retried only on network / 429 / 5xx
 }
 
 # Export file extension VHP's "Print CSV" produces (used when renaming).
