@@ -45,14 +45,14 @@ def _ci(expr):
 # The blue "SEARCH" button in the left filter panel (has visible text).
 SEARCH_BTN = "//button[contains({}, 'SEARCH')]".format(_ci("."))
 
-# The "Print CSV" entry in the menu opened by the printer icon.
-PRINT_CSV_ITEM = (
-    "//*[contains(@class,'q-item')][contains({ci}, 'PRINT CSV')]"
-    " | //*[{ci_text} = 'PRINT CSV']"
-).format(
-    ci=_ci("."),
-    ci_text="translate(normalize-space(text()),'{}','{}')".format(_LOWER, _UPPER),
-)
+# XPaths that enumerate the rows of an open Quasar menu/dropdown. We try them
+# in order and use the first that yields visible rows: scoped to the floating
+# .q-menu first (the printer dropdown lives there), then a broad fallback.
+_MENU_ITEM_XPATHS = [
+    "//div[contains(@class,'q-menu')]//div[contains(@class,'q-item')]",
+    "//div[contains(@class,'q-menu')]//*[@role='menuitem' or contains(@class,'q-item')]",
+    "//*[contains(@class,'q-item')]",
+]
 
 # A login password field = we are NOT logged in.
 _LOGIN_FIELDS = [
@@ -409,18 +409,57 @@ def wait_for_report_data(driver, timeout=60):
     raise TimeoutError("report data did not load after SEARCH")
 
 
+def _visible_menu_items(driver):
+    """Return [(element, UPPER_TEXT, raw_text)] for each visible row of an open
+    Quasar menu. Prefers rows inside the floating .q-menu, falling back to any
+    visible q-item only if that finds nothing."""
+    for xp in _MENU_ITEM_XPATHS:
+        out, seen = [], set()
+        for el in driver.find_elements(By.XPATH, xp):
+            try:
+                if not el.is_displayed():
+                    continue
+                if el.id in seen:
+                    continue
+                seen.add(el.id)
+                txt = (el.text or el.get_attribute("textContent") or "").strip()
+                out.append((el, txt.upper(), txt))
+            except Exception:  # noqa: BLE001 - stale element, skip
+                continue
+        if out:
+            return out
+    return []
+
+
+def _pick_csv_item(items):
+    """Choose the 'Print CSV' row from menu items: exact 'PRINT CSV' first, then
+    a row mentioning both PRINT and CSV, then any row mentioning CSV."""
+    for el, up, _ in items:
+        if up == "PRINT CSV":
+            return el
+    for el, up, _ in items:
+        if "PRINT" in up and "CSV" in up:
+            return el
+    for el, up, _ in items:
+        if "CSV" in up:
+            return el
+    return None
+
+
 def export_print_csv(driver):
     """Open the printer menu and click 'Print CSV' to start the download.
 
     Clicks the toolbar icon buttons (printer is the right-most) until a menu
-    containing 'Print CSV' appears, then clicks it. Robust to not knowing
-    exactly which icon is the printer.
+    with a CSV export row appears, then clicks it. Matches the row by its text
+    (any row mentioning CSV) rather than one fixed label, so it works across
+    reports whose menus word the entry slightly differently, and it prints the
+    menu rows it actually saw so a miss is diagnosable.
     """
     buttons = _toolbar_buttons(driver)
     if not buttons:
         raise RuntimeError("print/refresh toolbar not found above the table")
     last_err = None
-    saw_print_menu = False
+    all_seen = []
     for btn in reversed(buttons):  # printer is the right-most icon; try it first
         try:
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
@@ -431,25 +470,32 @@ def export_print_csv(driver):
         except Exception as exc:  # noqa: BLE001
             last_err = exc
             continue
-        time.sleep(0.9)  # let the menu animate in
-        # diagnostic: did ANY print-ish menu item appear?
-        if any(e.is_displayed() for e in driver.find_elements(
-                By.XPATH, "//*[contains(@class,'q-item')][contains({}, 'PRINT')]".format(_ci(".")))):
-            saw_print_menu = True
-        items = [el for el in driver.find_elements(By.XPATH, PRINT_CSV_ITEM) if el.is_displayed()]
-        if items:
-            _safe_click(driver, items[0])
+        # Let the menu animate in; poll so a slow-rendering menu isn't missed.
+        items, target, deadline = [], None, time.time() + 3.0
+        while time.time() < deadline:
+            items = _visible_menu_items(driver)
+            target = _pick_csv_item(items)
+            if target is not None or items:
+                break
+            time.sleep(0.2)
+        labels = [t for (_, _, t) in items if t]
+        if labels:
+            all_seen.extend(labels)
+            print("    (export) menu: {}".format(" | ".join(labels[:12])))
+        if target is not None:
+            _safe_click(driver, target)
             return
         try:  # close the menu we opened before trying the next button
             driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
         except Exception:  # noqa: BLE001
             pass
         time.sleep(0.3)
+    uniq = list(dict.fromkeys(all_seen))
     raise RuntimeError(
-        "'Print CSV' not found ({} button(s) tried; a Print menu {} seen){}".format(
+        "'Print CSV' not found ({} button(s) tried). Menu rows seen: {}{}".format(
             len(buttons),
-            "WAS" if saw_print_menu else "was NOT",
-            "" if last_err is None else "; last click error: {}".format(last_err),
+            "; ".join(uniq) if uniq else "(no menu opened)",
+            "" if last_err is None else " | last click error: {}".format(last_err),
         )
     )
 
