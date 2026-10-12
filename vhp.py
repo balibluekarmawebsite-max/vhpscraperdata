@@ -15,6 +15,7 @@ after SEARCH — every step waits explicitly rather than assuming instant render
 """
 import datetime
 import os
+import re
 import time
 
 from selenium.webdriver.common.by import By
@@ -233,17 +234,211 @@ def open_report(driver, report):
     raise TimeoutError("report page did not render: {}".format(report["url"]))
 
 
-def set_period(driver, report):
-    """Set the report's date filter before searching.
+# VHP renders the Date filter as DD/MM/YY (e.g. 12/10/26 = 12 Oct 2026).
+_VHP_DATE_FMT = "%d/%m/%y"
 
-    v1 uses VHP's DEFAULT period, which already matches a daily/weekly run:
-      * "current_month" reports (e.g. the forecast) open on the current month.
-      * "last_7_days" reports (e.g. reservations) open on the recent window.
-    Setting an exact custom range (typing into VHP's Month / Date controls) is a
-    planned refinement; it needs per-report field locators. For now we leave the
-    default and just press SEARCH.  (report["period"] documents the intent.)
+# JS that sets an <input>'s value the way Vue/Quasar notices (a raw el.value =
+# ... is ignored by the component's v-model). We call the native setter, then
+# fire the events Quasar listens on.
+_JS_SET_INPUT = (
+    "var el=arguments[0], v=arguments[1];"
+    "var d=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');"
+    "if(d&&d.set){d.set.call(el,v);}else{el.value=v;}"
+    "el.dispatchEvent(new Event('input',{bubbles:true}));"
+    "el.dispatchEvent(new Event('change',{bubbles:true}));"
+    "el.dispatchEvent(new Event('blur',{bubbles:true}));"
+)
+
+
+def _period_range(report):
+    """Return (start_date, end_date) datetime.date for report['period'], or None
+    to leave VHP's default untouched.
+
+        'last_7_days'   -> the 7 days ending today        (today-6 .. today)
+        'current_month' -> 1st of this month .. today
+        {'days_back': N, 'include_today': bool}  -> custom trailing window
+        None / anything else -> None
     """
-    return
+    today = datetime.date.today()
+    p = report.get("period")
+    if isinstance(p, dict):
+        n = max(1, int(p.get("days_back", 7)))
+        end = today if p.get("include_today", True) else today - datetime.timedelta(days=1)
+        return end - datetime.timedelta(days=n - 1), end
+    if p == "last_7_days":
+        return today - datetime.timedelta(days=6), today
+    if p == "current_month":
+        return today.replace(day=1), today
+    return None
+
+
+def _el_html(driver, el, limit=1600):
+    """Trimmed, whitespace-collapsed outerHTML of an element (for diagnostics)."""
+    try:
+        html = driver.execute_script("return arguments[0].outerHTML;", el) or ""
+    except Exception:  # noqa: BLE001
+        return "(outerHTML unavailable)"
+    html = " ".join(html.split())
+    return html + "" if len(html) <= limit else html[:limit] + " …(truncated)"
+
+
+def _find_date_field(driver):
+    """The Quasar field (q-field root) whose label is 'Date'. Falls back to any
+    field whose shown value looks like a 'dd/mm/yy - dd/mm/yy' range."""
+    by_label = (
+        "//*[contains(@class,'q-field')]"
+        "[.//*[contains(@class,'q-field__label')]"
+        "[translate(normalize-space(.),'{lo}','{up}')='DATE']]"
+    ).format(lo=_LOWER, up=_UPPER)
+    for el in driver.find_elements(By.XPATH, by_label):
+        if el.is_displayed():
+            return el
+    # Fallback: a field control whose displayed text contains a date range.
+    for el in driver.find_elements(By.CSS_SELECTOR, ".q-field"):
+        try:
+            if not el.is_displayed():
+                continue
+            txt = (el.text or "").replace("\n", " ")
+            if _looks_like_range(txt):
+                return el
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _looks_like_range(txt):
+    """True if txt contains something like '12/10/26 - 12/10/26'."""
+    return bool(re.search(r"\d{1,2}/\d{1,2}/\d{2,4}\s*-\s*\d{1,2}/\d{1,2}/\d{2,4}", txt or ""))
+
+
+def _date_field_value(driver, field):
+    """The Date field's currently-shown value ('12/10/26 - 12/10/26')."""
+    for css in (".q-field__native input", "input", ".q-field__native", ".ellipsis"):
+        for el in field.find_elements(By.CSS_SELECTOR, css):
+            try:
+                if el.tag_name == "input":
+                    val = el.get_attribute("value")
+                else:
+                    val = el.text or el.get_attribute("textContent")
+                val = (val or "").strip()
+                if val:
+                    return val
+            except Exception:  # noqa: BLE001
+                continue
+    return (field.text or "").replace("\n", " ").strip()
+
+
+def _range_matches(shown, start, end):
+    """True if the field's shown value reflects start..end (order-independent,
+    tolerant of spacing). Compares the dd/mm/yy strings as substrings."""
+    s = start.strftime(_VHP_DATE_FMT)
+    e = end.strftime(_VHP_DATE_FMT)
+    shown = (shown or "").replace(" ", "")
+    return s.replace(" ", "") in shown and e.replace(" ", "") in shown
+
+
+def _field_inputs(field):
+    return [i for i in field.find_elements(By.CSS_SELECTOR, "input")]
+
+
+def _try_type_range(driver, field, start, end):
+    """Type the range into the field's input(s): one combined input, or two
+    separate from/to inputs. Best-effort; returns True if it entered text."""
+    s = start.strftime(_VHP_DATE_FMT)
+    e = end.strftime(_VHP_DATE_FMT)
+    inputs = [i for i in _field_inputs(field) if i.is_displayed()]
+    if not inputs:
+        return False
+
+    def _fill(inp, text):
+        try:
+            inp.click()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            inp.send_keys(Keys.CONTROL, "a")
+            inp.send_keys(Keys.DELETE)
+        except Exception:  # noqa: BLE001
+            pass
+        inp.send_keys(text)
+
+    try:
+        if len(inputs) >= 2:
+            _fill(inputs[0], s)
+            _fill(inputs[1], e)
+        else:
+            _fill(inputs[0], "{} - {}".format(s, e))
+        # Commit the typed value with TAB (blurs the field) rather than ENTER —
+        # ENTER can submit the filter / trigger SEARCH before configure_report
+        # has set Show Revenue and the Segment Code untick.
+        inputs[-1].send_keys(Keys.TAB)
+    except Exception:  # noqa: BLE001
+        return False
+    time.sleep(0.6)
+    return True
+
+
+def _try_js_set_range(driver, field, start, end):
+    """Set the input value(s) via the native setter + Vue events."""
+    s = start.strftime(_VHP_DATE_FMT)
+    e = end.strftime(_VHP_DATE_FMT)
+    inputs = _field_inputs(field)
+    if not inputs:
+        return False
+    try:
+        if len(inputs) >= 2:
+            driver.execute_script(_JS_SET_INPUT, inputs[0], s)
+            driver.execute_script(_JS_SET_INPUT, inputs[1], e)
+        else:
+            driver.execute_script(_JS_SET_INPUT, inputs[0], "{} - {}".format(s, e))
+    except Exception:  # noqa: BLE001
+        return False
+    time.sleep(0.6)
+    return True
+
+
+def set_period(driver, report):
+    """Set the report's Date filter before SEARCH (e.g. the last 7 days for the
+    weekly reservation report).
+
+    Self-diagnosing and NON-FATAL: it prints the Date field's HTML and its value
+    before/after so a miss is debuggable, tries typing then a JS value-set, then
+    verifies by reading the field back. Returns True if the shown range matches
+    what we wanted, else False (the scrape still continues). Reports with no Date
+    field (period None, or no such control) are a no-op.
+    """
+    rng = _period_range(report)
+    if rng is None:
+        return True  # nothing to set for this report
+    start, end = rng
+    want = "{} - {}".format(start.strftime(_VHP_DATE_FMT), end.strftime(_VHP_DATE_FMT))
+
+    field = _find_date_field(driver)
+    if field is None:
+        print("    (period) no 'Date' field found — leaving VHP default")
+        return False
+
+    before = _date_field_value(driver, field)
+    print("    (period) want {} | field now shows: {}".format(want, before or "(blank)"))
+    print("    (period) field HTML: {}".format(_el_html(driver, field)))
+
+    for name, fn in (("type", _try_type_range), ("js-set", _try_js_set_range)):
+        try:
+            fn(driver, field, start, end)
+        except Exception as exc:  # noqa: BLE001
+            print("    (period) {} strategy error: {}".format(name, _describe(exc)))
+            continue
+        shown = _date_field_value(driver, _find_date_field(driver) or field)
+        if _range_matches(shown, start, end):
+            print("    (period) set to {} via {} (field shows: {})".format(want, name, shown))
+            return True
+        print("    (period) after {}: field shows {} (not yet {})".format(name, shown or "(blank)", want))
+
+    final = _date_field_value(driver, _find_date_field(driver) or field)
+    print("    (period) WARNING could not set range — field shows {} (wanted {}). "
+          "CSV will use that range; send me the 'field HTML' line above to fix.".format(
+              final or "(blank)", want))
+    return False
 
 
 def configure_report(driver, report):
@@ -594,7 +789,7 @@ def scrape_report(driver, prop, report, download_dir):
             raise RuntimeError("[{}] {}".format(name, _describe(exc)))
 
     step("open report", lambda: open_report(driver, report))
-    step("set period", lambda: set_period(driver, report))
+    set_period(driver, report)  # best-effort date filter (non-fatal; prints)
     configure_report(driver, report)  # best-effort filter settings (non-fatal)
     step("click SEARCH", lambda: click_search(driver))
     step("wait for data", lambda: wait_for_report_data(driver))

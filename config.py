@@ -96,7 +96,10 @@ REPORTS = [
         "name": "reservation-by-creation-date",
         "cadence": "weekly",
         "url": "https://e1-vhp.com/fr/reservation-by-creation-date",
-        "period": "last_7_days",
+        # Weekly run is scheduled for FRIDAY. This selects last Friday .. this
+        # Thursday — the 7 full days ending the day before the run (yesterday).
+        # (days_back=7, include_today=False -> today-7 .. today-1.)
+        "period": {"days_back": 7, "include_today": False},
     },
 ]
 
