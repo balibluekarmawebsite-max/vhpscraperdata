@@ -111,6 +111,10 @@ REPORTS = [
         # Thursday — the 7 full days ending the day before the run (yesterday).
         # (days_back=7, include_today=False -> today-7 .. today-1.)
         "period": {"days_back": 7, "include_today": False},
+        # Verified working (V-Calendar date picker). Gate ON: if the date range
+        # can't be set AND verified, SKIP this report rather than upload a CSV
+        # with VHP's default (wrong) window.
+        "period_required": True,
     },
 ]
 
