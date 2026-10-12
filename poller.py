@@ -179,15 +179,6 @@ def _find_property(code):
     return None
 
 
-def _month_period(month):
-    """{'start','end'} ISO range covering a whole 'YYYY-MM' month."""
-    y, m = (int(x) for x in month.split("-")[:2])
-    first = datetime.date(y, m, 1)
-    nxt = datetime.date(y + 1, 1, 1) if m == 12 else datetime.date(y, m + 1, 1)
-    last = nxt - datetime.timedelta(days=1)
-    return {"start": first.isoformat(), "end": last.isoformat()}
-
-
 def build_runtime_report(job):
     """Map a dashboard job to (report, property, error). `report` is a per-run
     copy of the base report for that section with the period / week / gate set.
@@ -243,22 +234,27 @@ def build_runtime_report(job):
         return r, prop, None
 
     if section == "B":
+        # Section B fills a calendar YEAR (a Jan..Dec table). The report shows 12
+        # months from its start month, so we start it at JANUARY of the requested
+        # year -> the export is a clean Jan..Dec of that year, which the dashboard
+        # maps straight onto its month rows. The user can pick any date in the
+        # year they want to (back)fill; we take the year from it.
         month = (job.get("month") or "").strip()
-        if month and not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
-            return None, None, "bad month {!r} (expected YYYY-MM, month 01-12)".format(month)
-        current = datetime.date.today().strftime("%Y-%m")
-        if month and month < current:  # a PAST month (string compare is valid for YYYY-MM)
-            if not config.JOBS.get("section_b_past_month_supported"):
-                return None, None, (
-                    "section B for a past month ({}) isn't wired yet — the VHP "
-                    "yearly-forecast date control still needs inspecting. (A section "
-                    "B job for the current or a future month runs fine.)".format(month))
-            r["period"] = _month_period(month)
-            r["period_required"] = True  # skip rather than upload a wrong month
-        # current or FUTURE month: the forward-forecast default export covers it,
-        # so leave period None and run the standard export.
+        year = job.get("year")
         if month:
-            r["_month"] = month
+            if not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
+                return None, None, "bad month {!r} (expected YYYY-MM)".format(month)
+            year = int(month[:4])
+        elif year:
+            try:
+                year = int(str(year)[:4])
+            except Exception:  # noqa: BLE001
+                return None, None, "bad year {!r} (expected YYYY)".format(year)
+        else:
+            year = datetime.date.today().year
+        r["period"] = {"month": "{:04d}-01".format(year)}  # January of that year
+        r["period_required"] = True   # skip rather than upload a wrong window
+        r["_year"] = year
         if job.get("week_ending"):
             r["week_ending"] = job["week_ending"]
         return r, prop, None

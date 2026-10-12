@@ -103,12 +103,16 @@ REPORTS = [
         # Dashboard import: section B (monthly ACTUALS only; never budget/LY).
         "section": "B",
         "source": "vhp:yearly-forecast",
-        # Leave VHP's own default period untouched for now. This is a FORWARD
-        # forecast, so a "current month" (1st..today) range would be the wrong
-        # direction, and its date control hasn't been inspected yet. Report #1
-        # already downloads correctly on the default, so set_period no-ops here.
-        # TODO: inspect this report's date control, then set the right period.
-        "period": None,
+        # The report shows 12 months FROM its start month (an Element-UI month
+        # picker). "calendar_year" sets the start to JANUARY of the current year,
+        # so the export is always a clean Jan..Dec of this year — closed months
+        # are actuals, the current month updates daily, later months are forecast.
+        # (VHP's own default starts at the CURRENT month, which would put next
+        # year's forecast into Jan..Sep — so we set January explicitly.)
+        "period": "calendar_year",
+        # Gate ON: if the January start can't be set AND verified, SKIP rather
+        # than upload the wrong (current-month-start) export.
+        "period_required": True,
         # Filter settings applied before SEARCH (best-effort; see vhp.configure_report):
         "checkboxes": {"Show Revenue": True},
         # Exact VHP option labels to turn OFF in the Segment Code list.
@@ -179,13 +183,6 @@ JOBS = {
     "poll_interval": 120,   # seconds to wait between polls when the queue is empty
     "timeout": 60,          # HTTP timeout (seconds) for claim/result calls
     "retry_backoffs": [2, 4, 8, 16],  # retry claim/result on network / 429 / 5xx
-    # Safety gate for section B (yearly-forecast) requested for a PAST month: until
-    # we've inspected how that report surfaces a closed month's actuals in VHP,
-    # a past-month B job FAILS cleanly rather than uploading the current (wrong)
-    # data mislabelled as that month. Flip True once set_period is confirmed for
-    # the yearly-forecast report. (A B job for the CURRENT month always runs — the
-    # default export already shows it.)
-    "section_b_past_month_supported": False,
 }
 
 # Lock file that serialises Chrome access so an on-demand job (poller.py) and the

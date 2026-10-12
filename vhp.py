@@ -1147,14 +1147,19 @@ def _set_period_inner(driver, report):
     Returns True once the shown range matches. Reports with no Date field (period
     None, or no such control) are a safe no-op."""
     p = report.get("period")
-    # Month-picker reports (yearly-forecast): period = {"month": "YYYY-MM"}.
-    # Drive the Element-UI month field instead of the date-range calendar.
-    if isinstance(p, dict) and p.get("month") and not (p.get("start") and p.get("end")):
+    # Month-picker reports (yearly-forecast): drive the Element-UI month field.
+    #   "calendar_year"           -> January of the CURRENT year
+    #   {"month": "YYYY-MM"}      -> that month (used to backfill a chosen year)
+    target = None
+    if p == "calendar_year":
+        target = datetime.date.today().replace(month=1, day=1)
+    elif isinstance(p, dict) and p.get("month") and not (p.get("start") and p.get("end")):
         try:
             target = _parse_iso("{}-01".format(p["month"]))
         except Exception as exc:  # noqa: BLE001
             print("    (period) bad month {!r}: {}".format(p.get("month"), _describe(exc)))
             return False
+    if target is not None:
         ok = _set_month_picker(driver, target)
         _close_overlays(driver)
         return ok

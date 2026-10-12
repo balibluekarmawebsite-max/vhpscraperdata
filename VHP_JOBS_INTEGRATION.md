@@ -201,18 +201,29 @@ rather than upload a wrong window. A job whose range isn’t a single Fri→Thu 
 (wrong day-of-week, or spanning more than 7 days) is **rejected up front** with a
 clear message. **To back-fill a month, queue one job per week.**
 
-**Section B — yearly-forecast (a month):**
-- `month` — `YYYY-MM`.
-  - **Current or FUTURE month** (or no `month`): the scraper runs the standard
-    yearly-forecast export (Show Revenue ticked, same as the daily run) and
-    uploads section B. This works today — the forward forecast already contains
-    the current and future months.
-  - **A PAST month:** see the open question in §8 — gated OFF on the scraper until
-    we confirm how VHP surfaces a *closed* month’s actuals, so a past-month B job
-    currently returns `failed` with a clear message instead of uploading the
-    wrong (current) data. A bad `month` (not `YYYY-MM`, or month not 01–12) is
-    rejected up front.
-- `week_ending` — optional for B; your parser keys section B by month.
+**Section B — yearly-forecast (a whole calendar YEAR):**
+
+The yearly-forecast report shows 12 months **from a start month** (an Element-UI
+month picker). The scraper always sets that start to **January of the target
+year**, so the export is a clean **Jan → Dec of that year**:
+- closed months = **actuals**, the current month updates, later months = forecast.
+
+Because the columns are always `Jan … Dec` in order, your **existing month-name
+matching is already correct — no dashboard change is needed.** (The reason the
+old data was wrong is the daily run used to start at the *current* month, so its
+`Jan…Sep` columns were actually *next* year’s forecast. Starting at January fixes
+that.)
+
+- `month` — `YYYY-MM` (or `year` — `YYYY`). The scraper takes the **year** from it
+  and starts the report at that January. So a user picking *any* date in 2026
+  backfills the **whole 2026 calendar year** in one request. No `month` / `year`
+  → the current year.
+- A bad `month` (not `YYYY-MM`) or `year` is rejected up front.
+- `week_ending` — not used for B; your parser keys section B by month name.
+
+> So **one Section B request = one full year.** To backfill 2026, request 2026
+> (e.g. the UI’s month picker set to Jan 2026). The daily scheduled run already
+> keeps the **current** year refreshed the same way.
 
 Property is `BKDS` / `BKDU` / `BKV` (case-insensitive on the scraper side).
 
@@ -246,30 +257,27 @@ Property is `BKDS` / `BKDU` / `BKV` (case-insensitive on the scraper side).
 
 ---
 
-## 8. OPEN QUESTION for section B (please answer this one)
+## 8. Section B — RESOLVED (how past-year backfill works)
 
-For section C the scraper is fully proven. For section B (“a specific month”) I
-need to know **how your yearly-forecast data behaves**, so we pull the correct
-month and don’t guess:
+This was an open question; it’s now solved. The yearly-forecast report **does
+not** contain closed-month actuals by default — its standard export starts at the
+*current* month and runs 12 months **forward**, so its `Jan…Sep` columns were
+*next* year’s forecast (that’s why `Jan` showed ~33% instead of the real ~77%).
 
-> **Does your section-B parser already read every month — including closed
-> months’ actuals (Jan–Sep) — from the standard yearly-forecast export?**
->
-> - **If YES:** then an on-demand section B job just needs to **re-run the
->   standard export** (which already contains all months), and you pick out the
->   requested month on your side. No change to VHP is needed, and I can enable
->   past-month B immediately. (In that case `month` is really just “which month
->   the user asked to refresh”.)
->
-> - **If NO** — the closed-month actuals are *not* in the standard export (this
->   is the “Jan–Sep stays manual” gap) — then VHP must be told to show that
->   month. In that case I need **one capture** of the yearly-forecast report’s
->   date/month control (the same thing we did for the reservation calendar): open
->   the report, and I’ll have the scraper print the date-control HTML + field
->   labels so I can drive it. Then I flip `section_b_past_month_supported` on.
+The fix: the report has a **month picker** (`data-cy="field-month"`). The scraper
+now sets it to **January of the target year**, and the export comes back as a
+clean **Jan → Dec of that year** — closed months as actuals. Verified against
+live data (e.g. BKDS `Jan 2026 = 77.42%` actual, vs the forward export’s
+`33.33%`).
 
-Until you answer, past-month B jobs fail cleanly with a message explaining this —
-so no wrong data is ever written.
+**Dashboard impact: none.** Because every Section B export is `Jan … Dec` in
+order, your existing month-name matching lands each column on the right row. You
+do **not** need to change `/api/import` or your parser. Just:
+- **Backfill a past year:** the user requests Section B for that year (any date in
+  it) → one upload fills all 12 months correctly.
+- **Current year:** the daily scheduled run now also starts at January, so it
+  keeps the current year’s table correct and fresh automatically (this replaces
+  the old behaviour that was filling `Jan…Sep` with next-year forecast).
 
 ---
 
@@ -309,7 +317,7 @@ first end-to-end test. `--drain` runs everything queued and exits. With no flag,
 - [ ] Both endpoints require the Bearer token (§9)
 - [ ] “Request scrape” UI: pick property + section + period → INSERT a `queued` row
 - [ ] Show each job’s status + message (queued / running / done / failed)
-- [ ] **Answer the section-B question in §8**
+- [ ] Section B: nothing to change — month-name matching already works (§8)
 
 Everything the scraper sends and expects is fixed by this document — build to it
 and the two sides line up the first time.
