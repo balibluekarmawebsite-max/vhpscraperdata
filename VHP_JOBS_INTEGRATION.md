@@ -146,11 +146,15 @@ Content-Type: application/json
   "worker": "office-pc-1",
   "status": "done",                 // "done" | "failed"
   "message": "Section C updated",   // human-readable; shown in the UI
-  "week_ending": "2026-10-01",      // echoed from the upload (may be null for B)
+  "week_ending": "2026-10-08",      // the week the scraper filled (set for C; may be null for B)
   "written": 7,                     // rows written (from /api/import), optional
   "import": { "ok": true, "property": "BKDS", "section": "C", "written": 7 }
 }
 ```
+
+> `week_ending` here is the week the scraper **actually filled** (the Thursday it
+> computed for section C), sent explicitly — the scraper does not rely on
+> `/api/import` echoing it back.
 
 **Response (HTTP 200):** `{ "ok": true }`
 
@@ -179,24 +183,35 @@ only status bookkeeping for the UI. You do **not** need to change `/api/import`.
 
 ## 6. What the scraper reads from each job
 
-**Section C — reservation-by-creation-date (a date range):**
-- `start`, `end` — the scraper sets VHP’s date filter to exactly this range
-  (inclusive), verifies it on screen, then exports. If it can’t set+verify the
-  range it **fails the job** rather than upload a wrong window.
-- `week_ending` — used as the `week_ending` in the `/api/import` call (so the
-  data lands in the week you’re filling). **Recommended:** set it to the Thursday
-  that ends the Fri→Thu week you’re filling (matches your `/weekly/<prop>/<week>/`
-  URLs). If omitted, the scraper derives it from `end`.
+**Section C — reservation-by-creation-date (ONE Fri→Thu week):**
+
+Section C is a **full replace of one week’s** market-segment rows, so each job is
+**exactly one Fri→Thu week** — never a multi-week range (a month of rows could
+only carry one week label, which would silently overwrite the wrong week).
+
+- `start` — **must be a Friday.**
+- `end` — **must be the following Thursday** (i.e. `end = start + 6 days`).
+- `week_ending` — **optional and, if sent, must equal `end`** (the Thursday). The
+  scraper uploads under `end` either way. (This lines up with your
+  `/weekly/<prop>/<week_ending>/` URLs, where `<week_ending>` is that Thursday.)
+
+The scraper sets VHP’s date filter to exactly `start..end`, verifies it on
+screen, and only then exports; if it can’t set+verify the week it **fails the job**
+rather than upload a wrong window. A job whose range isn’t a single Fri→Thu week
+(wrong day-of-week, or spanning more than 7 days) is **rejected up front** with a
+clear message. **To back-fill a month, queue one job per week.**
 
 **Section B — yearly-forecast (a month):**
 - `month` — `YYYY-MM`.
-  - **Current month** (or no `month`): the scraper runs the standard
+  - **Current or FUTURE month** (or no `month`): the scraper runs the standard
     yearly-forecast export (Show Revenue ticked, same as the daily run) and
-    uploads section B. This works today.
-  - **A past month:** see the open question in §8 — this is gated OFF on the
-    scraper until we confirm how VHP surfaces a closed month’s actuals, so a
-    past-month B job currently returns `failed` with a clear message instead of
-    uploading the wrong (current) data.
+    uploads section B. This works today — the forward forecast already contains
+    the current and future months.
+  - **A PAST month:** see the open question in §8 — gated OFF on the scraper until
+    we confirm how VHP surfaces a *closed* month’s actuals, so a past-month B job
+    currently returns `failed` with a clear message instead of uploading the
+    wrong (current) data. A bad `month` (not `YYYY-MM`, or month not 01–12) is
+    rejected up front.
 - `week_ending` — optional for B; your parser keys section B by month.
 
 Property is `BKDS` / `BKDU` / `BKV` (case-insensitive on the scraper side).
@@ -206,17 +221,28 @@ Property is `BKDS` / `BKDU` / `BKV` (case-insensitive on the scraper side).
 ## 7. Concurrency, retries, and the stale lease
 
 - **One job at a time** on the PC. The scraper also coordinates on-demand jobs
-  with the scheduled 6am/Friday runs locally, so Chrome is only ever driven by
-  one of them.
-- **Retries:** the scraper retries `claim` and `result` on network errors and on
-  `429 / 500 / 502 / 503 / 504` with backoff. Make both endpoints safe to call
-  again (the claim is naturally safe; make `result` idempotent per §4).
+  with the scheduled 6am/Friday runs and the hourly keep-alive locally (a file
+  lock), so Chrome is only ever driven by one of them.
+- **Retries:**
+  - `result` — the scraper retries on network errors and `429 / 500 / 502 / 503 /
+    504` with backoff, so make it **idempotent** (§4): a repeat for an
+    already-closed job just returns `{ "ok": true }`.
+  - `claim` — the scraper does **NOT** retry (a single attempt). `claim` consumes
+    a different job each time, so a blind retry after a lost response would strand
+    the first job; instead a missed claim is simply retried on the next poll. You
+    don’t need to do anything special — just don’t rely on the scraper retrying a
+    failed claim.
 - **Stale lease (important):** if a job is `running` but gets **no result within
-  ~30 minutes**, treat the worker as crashed and return the job to `queued` (or
+  ~60 minutes**, treat the worker as crashed and return the job to `queued` (or
   allow it to be re-claimed). That way a power cut or a closed Chrome window can
-  never strand a job in `running` forever. The scraper reports `failed` itself
-  whenever it can; the stale lease only covers the case where it dies before it
-  can report.
+  never strand a job in `running` forever.
+  - **Why 60, not 30:** an on-demand job can legitimately **wait** for Chrome
+    behind the scheduled daily/weekly run before it even starts scraping. The
+    scraper waits up to ~25 min for the lock, then scrapes+uploads (a few min), so
+    a perfectly healthy job can take ~30 min end-to-end. A 60-min lease leaves
+    margin so the dashboard doesn’t re-queue (and duplicate) a job that’s still
+    running normally. The scraper reports `failed`/`done` itself whenever it can;
+    the lease only covers a true crash before it can report.
 
 ---
 
@@ -279,7 +305,7 @@ first end-to-end test. `--drain` runs everything queued and exits. With no flag,
 - [ ] `scrape_jobs` table (§2)
 - [ ] `POST /api/jobs/claim` — atomic claim of the oldest queued job (§3)
 - [ ] `POST /api/jobs/{id}/result` — idempotent status update (§4)
-- [ ] Stale-lease: `running` with no result in ~30 min → re-queue (§7)
+- [ ] Stale-lease: `running` with no result in ~60 min → re-queue (§7)
 - [ ] Both endpoints require the Bearer token (§9)
 - [ ] “Request scrape” UI: pick property + section + period → INSERT a `queued` row
 - [ ] Show each job’s status + message (queued / running / done / failed)

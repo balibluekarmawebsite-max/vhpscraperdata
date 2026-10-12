@@ -27,6 +27,7 @@ import argparse
 import datetime
 import logging
 import os
+import re
 import sys
 import time
 
@@ -35,7 +36,7 @@ import requests
 import config
 from browser import kill_stale_chromedrivers, make_driver_attached
 from runlock import RunLock
-from uploader import UploadError, upload, week_ending
+from uploader import UploadError, upload
 from vhp import LoginRequired, _parse_iso, ensure_logged_in, scrape_report
 
 # How long a claimed job will wait for Chrome to free up (the scheduled run may
@@ -77,11 +78,14 @@ def _describe(exc):
 # ---------------------------------------------------------------------------
 # dashboard HTTP (claim a job / report a result)
 # ---------------------------------------------------------------------------
-def _post_json(cfg, url, payload):
-    """POST JSON with retries on network error / 429 / 5xx. Returns the Response
-    (even a 4xx — the caller decides), or raises requests.RequestException if the
-    network kept failing past the backoff budget."""
-    backoffs = cfg.get("retry_backoffs", [2, 4, 8, 16])
+def _post_json(cfg, url, payload, retry=True):
+    """POST JSON. With retry=True, retries network error / 429 / 5xx with backoff.
+    With retry=False, a SINGLE attempt (used for /api/jobs/claim, which is NOT
+    idempotent — each successful claim consumes a different job, so a retry after
+    a lost response would strand the first job). Returns the Response (even a 4xx
+    — the caller decides), or raises requests.RequestException on a network failure
+    past the backoff budget."""
+    backoffs = cfg.get("retry_backoffs", [2, 4, 8, 16]) if retry else []
     headers = {
         "Authorization": "Bearer {}".format(cfg.get("token", "")),
         "Content-Type": "application/json",
@@ -108,7 +112,11 @@ def claim_job(logger, cfg):
     when the queue is empty / the call didn't succeed (we just try again later —
     a failed claim is never fatal)."""
     try:
-        resp = _post_json(cfg, cfg["claim_url"], {"worker": cfg.get("worker", "")})
+        # retry=False: a lost response after the server committed the claim must
+        # NOT be retried (it would consume a second job). A miss just returns None
+        # and we try again on the next poll, so nothing is lost.
+        resp = _post_json(cfg, cfg["claim_url"], {"worker": cfg.get("worker", "")},
+                         retry=False)
     except requests.RequestException as exc:
         logger.warning("claim: network error (will retry next poll): %s", exc)
         return None
@@ -131,14 +139,20 @@ def claim_job(logger, cfg):
     return job if isinstance(job, dict) and job.get("id") is not None else None
 
 
-def report_result(logger, cfg, job_id, status, message, result):
+def report_result(logger, cfg, job_id, status, message, result, week_ending=None):
     """Tell the dashboard a job finished (done/failed). If this call itself fails
     the job stays 'running' on the dashboard — its stale-lease should re-queue it
-    (see the spec), so no data is silently lost."""
+    (see the spec), so no data is silently lost.
+
+    week_ending is the week the scraper actually filled (computed in
+    build_runtime_report) — we report THAT, since /api/import's JSON response
+    doesn't echo it back."""
     url = cfg["result_url"].format(id=job_id)
     payload = {"worker": cfg.get("worker", ""), "status": status, "message": message}
+    we = week_ending or (result.get("week_ending") if result else None)
+    if we is not None:
+        payload["week_ending"] = we
     if result is not None:
-        payload["week_ending"] = result.get("week_ending")
         payload["written"] = result.get("written")
         payload["import"] = {k: v for k, v in result.items() if not k.startswith("_")}
     try:
@@ -202,23 +216,47 @@ def build_runtime_report(job):
             return None, None, "bad start/end date: {}".format(_describe(exc))
         if e < s:
             return None, None, "end {} is before start {}".format(end, start)
+        # Section C is uploaded per WEEK — a full replace of ONE Fri->Thu week's
+        # segment rows. A multi-week range would export in full but could carry
+        # only one week label -> silently wrong-week data. So require exactly one
+        # Fri->Thu week: end is a Thursday (weekday 3) and start the Friday 6 days
+        # before. To back-fill several weeks, the dashboard queues one job each.
+        if e.weekday() != 3 or (e - s).days != 6:
+            return None, None, (
+                "section C is uploaded one week at a time (Fri->Thu): 'start' must "
+                "be a Friday and 'end' the following Thursday (got {}..{} = {} day(s)). "
+                "Queue one job per week to back-fill a month.".format(
+                    s.isoformat(), e.isoformat(), (e - s).days + 1))
+        we = job.get("week_ending")
+        if we:
+            try:
+                we_d = _parse_iso(we)
+            except Exception as exc:  # noqa: BLE001
+                return None, None, "bad week_ending: {}".format(_describe(exc))
+            if we_d != e:
+                return None, None, (
+                    "week_ending {} must equal the week's Thursday {} for section C"
+                    .format(we, e.isoformat()))
         r["period"] = {"start": s.isoformat(), "end": e.isoformat()}
-        r["period_required"] = True  # never upload a wrong window
-        r["week_ending"] = job.get("week_ending") or week_ending(e)
+        r["period_required"] = True            # never upload a wrong window
+        r["week_ending"] = e.isoformat()        # the Thursday that ends this week
         return r, prop, None
 
     if section == "B":
         month = (job.get("month") or "").strip()
+        if month and not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month):
+            return None, None, "bad month {!r} (expected YYYY-MM, month 01-12)".format(month)
         current = datetime.date.today().strftime("%Y-%m")
-        if month and month != current:
+        if month and month < current:  # a PAST month (string compare is valid for YYYY-MM)
             if not config.JOBS.get("section_b_past_month_supported"):
                 return None, None, (
                     "section B for a past month ({}) isn't wired yet — the VHP "
-                    "yearly-forecast date control still needs inspecting. "
-                    "(A section B job for the current month runs fine.)".format(month))
+                    "yearly-forecast date control still needs inspecting. (A section "
+                    "B job for the current or a future month runs fine.)".format(month))
             r["period"] = _month_period(month)
             r["period_required"] = True  # skip rather than upload a wrong month
-        # current month (or unspecified): default export already shows it.
+        # current or FUTURE month: the forward-forecast default export covers it,
+        # so leave period None and run the standard export.
         if month:
             r["_month"] = month
         if job.get("week_ending"):
@@ -228,17 +266,11 @@ def build_runtime_report(job):
     return None, None, "unsupported section {!r}".format(section)
 
 
-def run_one_job(logger, job):
-    """Scrape + upload for one job. Always returns (status, message, result) —
-    never raises — so the main loop can always report an outcome."""
-    try:
-        report, prop, err = build_runtime_report(job)
-    except Exception as exc:  # noqa: BLE001
-        return "failed", "could not interpret job: {}".format(_describe(exc)), None
-    if err:
-        return "failed", err, None
-
-    tag = "{}/{}#{}".format(prop["code"], report["name"], job.get("id"))
+def _scrape_and_upload(logger, report, prop, job_id):
+    """Attach, scrape the already-built+validated report, upload. Always returns
+    (status, message, result) — never raises — so the caller can always report an
+    outcome. Assumes the Chrome lock is already held by the caller."""
+    tag = "{}/{}#{}".format(prop["code"], report["name"], job_id)
     try:
         driver = make_driver_attached(prop["debug_port"], config.DOWNLOADS_DIR)
     except Exception as exc:  # noqa: BLE001
@@ -279,48 +311,75 @@ def run_one_job(logger, job):
 # the loop
 # ---------------------------------------------------------------------------
 def _process_one(logger, cfg, job):
-    """Take the Chrome lock, run the job, report the result."""
+    """Validate the job, then (only if it needs Chrome) take the lock, scrape,
+    and report the result."""
     jid = job.get("id")
+    # Validate FIRST — no Chrome, no lock. A bad/unsupported job (unknown section
+    # or property, bad dates, a gated-off past-month B) fails instantly with the
+    # real reason, instead of waiting out the lock and taskkilling chromedrivers.
+    try:
+        report, prop, err = build_runtime_report(job)
+    except Exception as exc:  # noqa: BLE001
+        report_result(logger, cfg, jid, "failed",
+                      "could not interpret job: {}".format(_describe(exc)), None,
+                      week_ending=job.get("week_ending"))
+        logger.info("job %s -> failed (bad job: %s)", jid, _describe(exc))
+        return
+    if err:
+        report_result(logger, cfg, jid, "failed", err, None,
+                      week_ending=job.get("week_ending"))
+        logger.info("job %s -> failed (%s)", jid, err)
+        return
+
+    we = report.get("week_ending")
     logger.info("claimed job %s: %s section %s %s", jid, job.get("property"),
                 job.get("section"),
                 job.get("month") or "{}..{}".format(job.get("start"), job.get("end")))
+
     lock = RunLock(config.RUN_LOCK_PATH)
     if not lock.acquire(wait=_LOCK_WAIT):
         logger.error("job %s: another VHP run held Chrome too long — reporting failed", jid)
         report_result(logger, cfg, jid, "failed",
                       "the office PC was busy with another VHP run for too long — "
-                      "please re-request this scrape", None)
+                      "please re-request this scrape", None, week_ending=we)
         return
     try:
         kill_stale_chromedrivers()
-        status, message, result = run_one_job(logger, job)
+        lock.refresh()  # keep the lock fresh so a slow scrape isn't judged stale
+        status, message, result = _scrape_and_upload(logger, report, prop, jid)
     finally:
         lock.release()
-    report_result(logger, cfg, jid, status, message, result)
+    report_result(logger, cfg, jid, status, message, result, week_ending=we)
     logger.info("job %s -> %s (%s)", jid, status, message)
 
 
 def poll_loop(logger, cfg, drain=False, once=False):
     """Claim and run jobs. drain=True exits when the queue is empty; once=True
-    exits after at most one job; otherwise loops forever, polling when idle."""
+    exits after at most one job; otherwise loops forever, polling when idle.
+
+    The body is wrapped so ONE unexpected error can never take the watcher down —
+    it logs, waits, and keeps polling. A dead poller silently stops answering all
+    scrape requests, which is worse than a logged hiccup."""
     interval = cfg.get("poll_interval", 120)
     last_beat = time.time()
     while True:
-        job = claim_job(logger, cfg)
-        if job is not None:
-            _process_one(logger, cfg, job)
-            if once:
+        did_job = False
+        try:
+            job = claim_job(logger, cfg)
+            if job is not None:
+                did_job = True
+                _process_one(logger, cfg, job)
+                if once:
+                    return
+            elif drain or once:
+                logger.info("no jobs queued — exiting.")
                 return
-            time.sleep(2)   # a short beat, then check for the next queued job
-            continue
-        # queue empty
-        if drain or once:
-            logger.info("no jobs queued — exiting.")
-            return
-        if time.time() - last_beat >= _HEARTBEAT:
-            logger.info("alive — no jobs queued (polling every %ss)", interval)
-            last_beat = time.time()
-        time.sleep(interval)
+            elif time.time() - last_beat >= _HEARTBEAT:
+                logger.info("alive — no jobs queued (polling every %ss)", interval)
+                last_beat = time.time()
+        except Exception as exc:  # noqa: BLE001 - the daemon must never die on one error
+            logger.exception("poll cycle error (continuing): %s", exc)
+        time.sleep(2 if did_job else interval)
 
 
 # ---------------------------------------------------------------------------

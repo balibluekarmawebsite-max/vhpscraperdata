@@ -9,6 +9,13 @@ Nothing in the other files should need editing for normal operation.
 import os
 import socket
 
+# Hostname for the JOBS "worker" id, computed defensively: a hostname lookup must
+# never break `import config` (which the scheduled run also does).
+try:
+    _HOSTNAME = socket.gethostname()
+except Exception:  # noqa: BLE001
+    _HOSTNAME = ""
+
 # Absolute path of this project folder. Everything else is derived from it so
 # the project works no matter where it's checked out (C:\vhp-scraper, etc.).
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -168,7 +175,7 @@ JOBS = {
     # VHP_JOBS_TOKEN env var if you'd rather the queue use its own token.
     "token": os.environ.get("VHP_JOBS_TOKEN", "") or os.environ.get("IMPORT_API_TOKEN", ""),
     # A name for THIS PC in the dashboard's job records (who claimed the job).
-    "worker": os.environ.get("VHP_WORKER_ID", "") or socket.gethostname(),
+    "worker": os.environ.get("VHP_WORKER_ID", "") or _HOSTNAME or "vhp-pc",
     "poll_interval": 120,   # seconds to wait between polls when the queue is empty
     "timeout": 60,          # HTTP timeout (seconds) for claim/result calls
     "retry_backoffs": [2, 4, 8, 16],  # retry claim/result on network / 429 / 5xx
