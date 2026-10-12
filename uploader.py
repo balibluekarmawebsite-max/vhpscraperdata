@@ -100,7 +100,19 @@ def upload(path, property_code, report, cfg=None, today=None):
             try:
                 body = resp.json()
             except ValueError:
-                body = {"raw": (resp.text or "")[:300]}
+                body = None
+            # A real import returns JSON with "ok": true. A 2xx with an HTML body
+            # (the Next.js app shell) means the request hit the web app, NOT the
+            # /api/import handler — that is NEVER a successful push, so fail loudly
+            # instead of silently reporting success and losing the data.
+            if not isinstance(body, dict) or not body.get("ok"):
+                ctype = resp.headers.get("content-type", "")
+                snippet = (resp.text or "")[:160].replace("\n", " ").replace("\r", " ")
+                raise UploadError(
+                    "got a {} but not the API's JSON (content-type {!r}) — the "
+                    "request likely hit the web app, not /api/import. First bytes: {}"
+                    .format(resp.status_code, ctype, snippet),
+                    status=resp.status_code)
             body["_status"] = resp.status_code
             return body
 
