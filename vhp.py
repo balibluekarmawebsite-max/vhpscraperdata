@@ -536,6 +536,69 @@ def _close_overlays(driver):
         time.sleep(0.25)
 
 
+def dismiss_blocking_dialog(driver):
+    """If a Quasar MODAL (q-dialog) is covering the page, its full-screen backdrop
+    intercepts every real click — so the toolbar menu won't open, segment options
+    won't select, and calendar days won't click (the JS-click fallback is ignored
+    by Quasar/V-Calendar). Print what the modal is (once per call), then close it:
+    ESC, its close button, a backdrop click, and finally neutralise any remaining
+    full-screen backdrop so clicks reach the page. Returns True if one was seen."""
+    backdrops = []
+    for b in driver.find_elements(By.CSS_SELECTOR, ".q-dialog__backdrop"):
+        try:
+            if b.is_displayed():
+                backdrops.append(b)
+        except Exception:  # noqa: BLE001
+            continue
+    if not backdrops:
+        return False
+    try:
+        html = driver.execute_script(
+            "var d=document.querySelector('.q-dialog__inner, .q-dialog');"
+            "return d ? d.outerHTML.replace(/\\s+/g,' ').slice(0,700) : '(no inner)';")
+        print("    (dialog) blocking modal present -> {}".format(html))
+    except Exception:  # noqa: BLE001
+        pass
+    _close_overlays(driver)
+    # a close/dismiss button inside the dialog
+    for sel in ("[data-cy*='close']", "[data-cy*='cancel']",
+                ".q-dialog .q-btn[aria-label*='lose']", ".q-dialog .mdi-close",
+                ".q-dialog .mdi-window-close"):
+        for el in driver.find_elements(By.CSS_SELECTOR, sel):
+            try:
+                if el.is_displayed():
+                    _force_click(driver, el)
+                    time.sleep(0.3)
+            except Exception:  # noqa: BLE001
+                continue
+    # click the backdrop (closes non-persistent dialogs)
+    for b in backdrops:
+        try:
+            _force_click(driver, b)
+            time.sleep(0.3)
+        except Exception:  # noqa: BLE001
+            continue
+    # still there? neutralise the full-screen backdrop so clicks pass through
+    remaining = [b for b in driver.find_elements(By.CSS_SELECTOR, ".q-dialog__backdrop")
+                 if _disp_safe(b)]
+    if remaining:
+        try:
+            driver.execute_script(
+                "document.querySelectorAll('.q-dialog__backdrop').forEach("
+                "function(b){b.style.pointerEvents='none';});")
+            print("    (dialog) backdrop left open — neutralised pointer-events so clicks pass")
+        except Exception:  # noqa: BLE001
+            pass
+    return True
+
+
+def _disp_safe(el):
+    try:
+        return el.is_displayed()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _try_type_range(driver, field, start, end):
     """Type the range into an EDITABLE input (skips readonly calendar-only
     fields). Commits with TAB, never ENTER (ENTER can submit SEARCH early)."""
@@ -1202,7 +1265,7 @@ def export_print_csv(driver):
         raise RuntimeError("print/refresh toolbar not found above the table")
     last_err = None
     all_seen = []
-    _close_overlays(driver)  # clear any stray modal/backdrop before clicking
+    dismiss_blocking_dialog(driver)  # a modal backdrop would block every button
     for btn in reversed(buttons):  # printer is the right-most icon; try it first
         try:
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
@@ -1381,7 +1444,7 @@ def scrape_report(driver, prop, report, download_dir):
             raise RuntimeError("[{}] {}".format(name, _describe(exc)))
 
     step("open report", lambda: open_report(driver, report))
-    _close_overlays(driver)  # clear any stray modal left over before configuring
+    dismiss_blocking_dialog(driver)  # clear a stale modal backdrop that blocks clicks
     period_ok = set_period(driver, report)  # best-effort date filter (non-fatal; prints)
     if report.get("period_required") and not period_ok:
         # Opt-in safety gate (default OFF). Once set_period is confirmed working
