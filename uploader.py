@@ -154,19 +154,28 @@ def _error_detail(resp):
 if __name__ == "__main__":
     # Quick manual test of ONE upload, independent of scraping:
     #   set IMPORT_API_TOKEN=...   (Windows: set IMPORT_API_TOKEN=xxxx)
-    #   python uploader.py <file.csv> <property> <section> [week_ending]
+    #   python uploader.py <file.csv> <property> <section> [week_ending] [--once]
+    #
+    # --once = a SINGLE attempt, no retries. Use it while debugging the server so
+    #          a failing upload doesn't retry 5x (and crash-loop the app 5x).
     import sys
 
-    _args = sys.argv[1:]
+    _argv = sys.argv[1:]
+    _once = "--once" in _argv
+    _args = [a for a in _argv if a != "--once"]
     if len(_args) < 3:
         print("usage: python uploader.py <file.csv> <property BKDS|BKDU|BKV> "
-              "<section B|C> [week_ending YYYY-MM-DD]")
+              "<section B|C> [week_ending YYYY-MM-DD] [--once]")
         raise SystemExit(2)
     _report = {"name": "manual-test", "section": _args[2], "source": "manual-test"}
     if len(_args) > 3:
         _report["week_ending"] = _args[3]
+    _cfg = None
+    if _once:
+        _cfg = dict(config.UPLOAD, retry_backoffs=[])  # no retries
+        print("(--once: single attempt, no retries)")
     try:
-        _res = upload(_args[0], _args[1], _report)
+        _res = upload(_args[0], _args[1], _report, cfg=_cfg)
         print("OK:", _res)
     except UploadError as _exc:
         print("UPLOAD ERROR (status {}): {}".format(_exc.status, _exc))
