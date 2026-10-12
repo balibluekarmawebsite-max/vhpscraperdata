@@ -545,12 +545,25 @@ def _try_type_range(driver, field, start, end):
 
 
 # --- QDate calendar-popup driver (the reliable path for a readonly range) ----
+def _first_visible_popup(driver):
+    """First visible floating popup (date/menu/dialog), whatever its class."""
+    for css in (".q-date", ".q-menu", ".q-dialog"):
+        for p in driver.find_elements(By.CSS_SELECTOR, css):
+            try:
+                if p.is_displayed():
+                    return p
+            except Exception:  # noqa: BLE001
+                continue
+    return None
+
+
 def _open_date_popup(driver, field):
-    """Click the field's calendar icon (or the control) to open the QDate popup;
-    return the visible .q-date element, or None."""
+    """Click the calendar icon / control / input to open the date popup. Returns
+    the first visible popup (.q-date, .q-menu or .q-dialog), or None — broadened
+    beyond .q-date because VHP's date-input may use a custom popup."""
     openers = []
-    for css in (".q-field__append .q-icon", ".q-field__append",
-                ".q-field__control", ".q-field__native"):
+    for css in (".q-field__append .q-icon", "i.mdi-calendar", ".q-field__append",
+                ".q-field__control", ".q-field__native", "input"):
         try:
             openers.extend(field.find_elements(By.CSS_SELECTOR, css))
         except Exception:  # noqa: BLE001
@@ -560,19 +573,37 @@ def _open_date_popup(driver, field):
         try:
             if not op.is_displayed():
                 continue
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", op)
         except Exception:  # noqa: BLE001
             continue
         _safe_click(driver, op)
-        end = time.time() + 3
+        end = time.time() + 2.5
         while time.time() < end:
-            for d in driver.find_elements(By.CSS_SELECTOR, ".q-date"):
-                try:
-                    if d.is_displayed():
-                        return d
-                except Exception:  # noqa: BLE001
-                    continue
+            pop = _first_visible_popup(driver)
+            if pop is not None:
+                return pop
             time.sleep(0.2)
     return None
+
+
+def _dump_popups(driver):
+    """JS dump of any visible popup/calendar/dialog so an unknown date popup's
+    structure is captured in one run."""
+    js = r"""
+    var sel='.q-date,.q-menu,.q-dialog,[class*="picker"],[class*="calendar"],[class*="popup"]';
+    var els=document.querySelectorAll(sel), out=[];
+    for (var i=0;i<els.length;i++){
+      var e=els[i], r=e.getBoundingClientRect();
+      if (r.width===0 && r.height===0) continue;
+      out.push('<'+e.tagName+' class='+JSON.stringify((e.className||'').slice(0,100))+'> '+
+               (e.outerHTML||'').replace(/\s+/g,' ').slice(0,1500));
+    }
+    return out.length ? out.join('\n   --- ') : '(no visible popup elements)';
+    """
+    try:
+        return driver.execute_script(js)
+    except Exception as exc:  # noqa: BLE001
+        return "(popup diag failed: {})".format(_describe(exc))
 
 
 def _qdate_nav_text_buttons(driver):
@@ -666,10 +697,11 @@ def _try_calendar_range(driver, field, start, end):
     """Drive the QDate popup to select start..end (QDate range mode = two day
     clicks). Dumps the popup HTML once so a miss is fixable in one round-trip."""
     popup = _open_date_popup(driver, field)
+    print("    (period) popups after open: {}".format(_dump_popups(driver)))
     if popup is None:
         print("    (period) calendar popup did not open")
+        _close_overlays(driver)
         return False
-    print("    (period) QDate popup HTML: {}".format(_el_html(driver, popup, 2400)))
     for label, d in (("start", start), ("end", end)):
         _qdate_goto(driver, d.year, d.month)
         if not _click_qday(driver, d.day):
@@ -788,10 +820,12 @@ def _set_period_inner(driver, report):
         time.sleep(0.4)  # let Quasar re-render before trusting a read-back
         return _date_field_value(driver, _find_date_field(driver) or field)
 
+    # NOTE: a raw JS value-set is intentionally NOT used on this readonly
+    # {from,to} range input — it only half-updates the model (sets 'from', leaves
+    # 'to'), producing a wrong search range. The calendar popup is the real path.
     strategies = (
-        ("type", _try_type_range),       # works only on an editable input
+        ("type", _try_type_range),          # editable input only (readonly -> no-op)
         ("calendar", _try_calendar_range),  # the reliable path for a readonly range
-        ("js-set", _try_js_set_range),    # last resort
     )
     for name, fn in strategies:
         field = _find_date_field(driver) or field  # re-find: a prior strategy may have re-rendered
