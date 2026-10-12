@@ -74,6 +74,32 @@ def _safe_click(driver, el):
         driver.execute_script("arguments[0].click();", el)
 
 
+_FULL_CLICK_JS = (
+    "var e=arguments[0];"
+    "['mouseover','mousedown','mouseup','click'].forEach(function(t){"
+    "try{e.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));}"
+    "catch(_){}});"
+)
+
+
+def _force_click(driver, el):
+    """Click that still fires when an overlay/backdrop intercepts a normal click:
+    native click, then a JS .click(), then a full mouse-event sequence."""
+    try:
+        el.click()
+        return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        driver.execute_script("arguments[0].click();", el)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        driver.execute_script(_FULL_CLICK_JS, el)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _toolbar_buttons(driver):
     """The round icon buttons (refresh, print) that sit just above the report
     table. In document order the printer is the LAST one before the table."""
@@ -777,7 +803,7 @@ def _click_vc_day(driver, date, max_nav=30):
                     spans = el.find_elements(By.CSS_SELECTOR, ".vc-day-content")
                     if spans and spans[0].is_displayed():
                         target = spans[0]
-                    _safe_click(driver, target)
+                    _force_click(driver, target)  # bypass any intercepting overlay
                     return True
                 except Exception:  # noqa: BLE001
                     continue
@@ -1176,13 +1202,16 @@ def export_print_csv(driver):
         raise RuntimeError("print/refresh toolbar not found above the table")
     last_err = None
     all_seen = []
+    _close_overlays(driver)  # clear any stray modal/backdrop before clicking
     for btn in reversed(buttons):  # printer is the right-most icon; try it first
         try:
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
         except Exception:  # noqa: BLE001
             pass
         try:
-            btn.click()
+            # _safe_click's JS fallback fires the click even if a dialog backdrop
+            # is intercepting normal clicks ('not clickable at point').
+            _safe_click(driver, btn)
         except Exception as exc:  # noqa: BLE001
             last_err = exc
             continue
@@ -1352,6 +1381,7 @@ def scrape_report(driver, prop, report, download_dir):
             raise RuntimeError("[{}] {}".format(name, _describe(exc)))
 
     step("open report", lambda: open_report(driver, report))
+    _close_overlays(driver)  # clear any stray modal left over before configuring
     period_ok = set_period(driver, report)  # best-effort date filter (non-fatal; prints)
     if report.get("period_required") and not period_ok:
         # Opt-in safety gate (default OFF). Once set_period is confirmed working
