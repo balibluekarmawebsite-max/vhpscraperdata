@@ -536,52 +536,45 @@ def _close_overlays(driver):
         time.sleep(0.25)
 
 
-# Overlays whose backdrop dims the page and swallows clicks: a modal dialog, OR
-# a side DRAWER like VHP's Notification panel (left open, it blocks everything).
+# A BACKDROP is the only reliable signal of a *blocking* overlay (a modal dialog
+# or an overlay drawer like VHP's Notification panel dims the page behind one).
+# A standard always-present drawer — e.g. VHP's 50px right icon bar
+# (q-drawer--standard) — has NO backdrop and must be left alone.
 _OVERLAY_BACKDROPS = ".q-dialog__backdrop, .q-drawer__backdrop"
 
 
 def dismiss_blocking_dialog(driver):
-    """Close any Quasar overlay (modal dialog OR side drawer, e.g. VHP's
-    Notification panel) whose backdrop dims the page and intercepts every real
-    click — the cause of 'menu not opened' / 'option not found' / 'could not
-    click day'. Print what it is, then close it: ESC, its ✕/close button, a
-    backdrop click, and finally neutralise any backdrop still left so clicks
-    reach the page. Returns True if one was seen."""
+    """Close a Quasar overlay (modal dialog or overlay drawer, e.g. VHP's
+    Notification panel) ONLY when its backdrop is dimming the page and
+    intercepting clicks. Keyed strictly on a visible backdrop, so permanent
+    layout drawers are never touched. Closes gently without clicking inside any
+    panel: ESC, a backdrop click, then neutralise any backdrop still left."""
     backdrops = [b for b in driver.find_elements(By.CSS_SELECTOR, _OVERLAY_BACKDROPS)
                  if _disp_safe(b)]
-    drawers = [d for d in driver.find_elements(By.CSS_SELECTOR, ".q-drawer")
-               if _disp_safe(d)]
-    if not backdrops and not drawers:
+    if not backdrops:
         return False
     try:
         html = driver.execute_script(
-            "var d=document.querySelector('.q-drawer, .q-dialog__inner, .q-dialog');"
-            "return d ? d.outerHTML.replace(/\\s+/g,' ').slice(0,500) : '(none)';")
-        print("    (overlay) blocking overlay present -> {}".format(html))
+            "var d=document.querySelector('.q-dialog__inner, .q-menu, "
+            ".q-drawer--mobile, .q-drawer--right.q-drawer--standard + * .q-drawer');"
+            "return d ? d.outerHTML.replace(/\\s+/g,' ').slice(0,350) : '(backdrop only)';")
+        print("    (overlay) blocking backdrop present -> {}".format(html))
     except Exception:  # noqa: BLE001
         pass
-    _close_overlays(driver)  # ESC
-    # a ✕ / close / cancel control inside the drawer or dialog
-    for sel in ("[data-cy*='close']", "[data-cy*='cancel']",
-                ".q-drawer .mdi-close", ".q-drawer .mdi-window-close",
-                ".q-drawer [aria-label*='lose']", ".q-drawer button .q-icon",
-                ".q-dialog .mdi-close", ".q-dialog [aria-label*='lose']"):
-        for el in driver.find_elements(By.CSS_SELECTOR, sel):
-            try:
-                if el.is_displayed():
-                    _force_click(driver, el)
-                    time.sleep(0.3)
-            except Exception:  # noqa: BLE001
-                continue
-    # click the backdrop (an overlay drawer/dialog closes on a backdrop click)
-    for b in backdrops:
+    _close_overlays(driver)                       # ESC
+    for b in backdrops:                           # click the dimmed area to close it
         try:
             _force_click(driver, b)
             time.sleep(0.3)
         except Exception:  # noqa: BLE001
             continue
-    # still dimming the page? neutralise any backdrop so clicks pass through
+    for el in driver.find_elements(By.CSS_SELECTOR, "[data-cy*='close']"):  # a safe ✕
+        try:
+            if el.is_displayed():
+                _force_click(driver, el)
+                time.sleep(0.2)
+        except Exception:  # noqa: BLE001
+            continue
     if [b for b in driver.find_elements(By.CSS_SELECTOR, _OVERLAY_BACKDROPS) if _disp_safe(b)]:
         try:
             driver.execute_script(
