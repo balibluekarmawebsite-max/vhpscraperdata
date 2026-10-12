@@ -724,18 +724,101 @@ def _click_qday(driver, day):
     return False
 
 
+def _vc_rendered_dates(driver):
+    """Every date currently rendered in the V-Calendar (from each cell's
+    'id-YYYY-MM-DD' class), to decide which way to page."""
+    out = set()
+    for el in driver.find_elements(By.CSS_SELECTOR, ".vc-day"):
+        try:
+            m = re.search(r"\bid-(\d{4})-(\d{2})-(\d{2})\b", el.get_attribute("class") or "")
+            if m:
+                out.add(datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _vc_click_arrow(driver, direction):
+    """Click the V-Calendar prev/next month arrow (< or >)."""
+    sels = {
+        "left": [".vc-arrow.is-left", ".vc-prev", ".vc-arrow.vc-prev",
+                 "[class*='vc-arrow'][class*='left']"],
+        "right": [".vc-arrow.is-right", ".vc-next", ".vc-arrow.vc-next",
+                  "[class*='vc-arrow'][class*='right']"],
+    }[direction]
+    for sel in sels:
+        for el in driver.find_elements(By.CSS_SELECTOR, sel):
+            try:
+                if el.is_displayed():
+                    _safe_click(driver, el)
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False
+
+
+def _click_vc_day(driver, date, max_nav=18):
+    """Click a V-Calendar day by its exact 'id-YYYY-MM-DD' class (paging the
+    calendar toward the target month if it isn't currently shown). Prefers the
+    real in-month cell over an adjacent-month spillover cell of the same date."""
+    iso = date.strftime("%Y-%m-%d")
+    xp_in = ("//*[contains(concat(' ',normalize-space(@class),' '),' id-{iso} ')]"
+             "[not(contains(concat(' ',normalize-space(@class),' '),' is-not-in-month '))]"
+             ).format(iso=iso)
+    xp_any = "//*[contains(concat(' ',normalize-space(@class),' '),' id-{iso} ')]".format(iso=iso)
+    for _ in range(max_nav):
+        for xp in (xp_in, xp_any):
+            for el in driver.find_elements(By.XPATH, xp):
+                try:
+                    if not el.is_displayed():
+                        continue
+                    target = el
+                    spans = el.find_elements(By.CSS_SELECTOR, ".vc-day-content")
+                    if spans and spans[0].is_displayed():
+                        target = spans[0]
+                    _safe_click(driver, target)
+                    return True
+                except Exception:  # noqa: BLE001
+                    continue
+        rendered = _vc_rendered_dates(driver)
+        if not rendered:
+            break
+        if date < min(rendered):
+            if not _vc_click_arrow(driver, "left"):
+                break
+        elif date > max(rendered):
+            if not _vc_click_arrow(driver, "right"):
+                break
+        else:
+            break  # within the shown range but not found — give up
+        time.sleep(0.5)
+    return False
+
+
 def _try_calendar_range(driver, field, start, end):
-    """Drive the QDate popup to select start..end (QDate range mode = two day
-    clicks). Dumps the popup HTML once so a miss is fixable in one round-trip."""
+    """Open the date popup and select start..end. VHP uses V-Calendar in range
+    mode, whose day cells carry an exact 'id-YYYY-MM-DD' class — so we click days
+    by date (no month-name/locale guessing). Falls back to a Quasar QDate for any
+    other report that might use one."""
     popup, dump = _open_and_capture_popup(driver, field)
     print("    (period) popup opened on click: {}".format(dump))
     if popup is None:
         _close_overlays(driver)
         return False
-    for label, d in (("start", start), ("end", end)):
-        _qdate_goto(driver, d.year, d.month)
-        if not _click_qday(driver, d.day):
-            print("    (period) could not click {} day {}".format(label, d.day))
+    is_vcal = ("vc-day" in (dump or "")) or bool(driver.find_elements(By.CSS_SELECTOR, ".vc-day"))
+    if is_vcal:
+        # Range mode = click the start day, then the end day.
+        if not _click_vc_day(driver, start):
+            print("    (period) could not click start {}".format(start.strftime("%Y-%m-%d")))
+        time.sleep(0.6)
+        if not _click_vc_day(driver, end):
+            print("    (period) could not click end {}".format(end.strftime("%Y-%m-%d")))
+    else:  # fallback: standard Quasar QDate
+        for label, d in (("start", start), ("end", end)):
+            _qdate_goto(driver, d.year, d.month)
+            if not _click_qday(driver, d.day):
+                print("    (period) could not click {} day {}".format(label, d.day))
+    time.sleep(0.5)
     _close_overlays(driver)
     return True
 
