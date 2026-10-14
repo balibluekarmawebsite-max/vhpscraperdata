@@ -113,9 +113,27 @@ def _toolbar_buttons(driver):
 # ---------------------------------------------------------------------------
 # login detection
 # ---------------------------------------------------------------------------
+def _session_expired(driver):
+    """True if VHP is showing its 'Your Session has been expired, please re-login'
+    dialog. The session timed out server-side, so a human must re-login — we treat
+    this exactly like a login form (the scraper can't get past VHP's CAPTCHA)."""
+    xp = ("//*[contains({c}, 'SESSION') and contains({c}, 'EXPIRED')]"
+          " | //*[contains({c}, 'RE-LOGIN')]"
+          " | //*[contains({c}, 'RELOGIN')]").format(c=_ci("."))
+    for el in driver.find_elements(By.XPATH, xp):
+        try:
+            if el.is_displayed():
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
 def is_logged_in(driver):
-    """True unless a visible login field is on screen."""
+    """True unless a visible login field OR the 'session expired' dialog is on screen."""
     time.sleep(1)  # let the SPA settle after navigation
+    if _session_expired(driver):
+        return False
     for sel in _LOGIN_FIELDS:
         for el in driver.find_elements(By.CSS_SELECTOR, sel):
             if el.is_displayed():
@@ -198,6 +216,11 @@ def ensure_logged_in(driver, prop, creds, probe_url):
     driver.get(probe_url)
     time.sleep(3)  # let the SPA render (app or login form)
 
+    if _session_expired(driver):
+        raise LoginRequired(
+            "{code}: VHP session expired — click OK and log into VHP by hand in the "
+            "'{code}' Chrome window, then re-run.".format(code=prop["code"]))
+
     if _login_form(driver) is None:
         return  # saved session still valid -> logged in
 
@@ -249,6 +272,12 @@ def open_report(driver, report):
     driver.get(report["url"])
     end = time.time() + 40
     while time.time() < end:
+        # Check the 'session expired' dialog FIRST — a stale report may still be
+        # behind it, so the SEARCH button could otherwise look like "logged in".
+        if _session_expired(driver):
+            raise LoginRequired(
+                "VHP session expired on report {!r} — click OK and log into VHP "
+                "by hand in that Chrome window, then re-run.".format(report["name"]))
         if driver.find_elements(By.XPATH, SEARCH_BTN):
             return  # report rendered -> logged in
         for sel in _LOGIN_FIELDS:

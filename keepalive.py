@@ -23,10 +23,10 @@ tick — that run is already keeping the sessions alive, and we must never drive
 same window from two places at once.
 """
 import argparse
-import datetime
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 
 import config
 from browser import kill_stale_chromedrivers, make_driver_attached
@@ -36,14 +36,15 @@ from vhp import (LoginRequired, click_search, open_report, wait_for_report_data)
 
 def setup_logging():
     os.makedirs(config.LOGS_DIR, exist_ok=True)
-    stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    log_path = os.path.join(config.LOGS_DIR, "keepalive-{}.log".format(stamp))
+    # Keep-alive runs often (every few minutes), so append to ONE rolling file
+    # (capped) instead of a new file per run.
+    log_path = os.path.join(config.LOGS_DIR, "keepalive.log")
 
     logger = logging.getLogger("vhp.keepalive")
     logger.setLevel(logging.INFO)
     logger.handlers[:] = []
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(message)s")
-    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh = RotatingFileHandler(log_path, maxBytes=1000000, backupCount=2, encoding="utf-8")
     fh.setFormatter(fmt)
     logger.addHandler(fh)
     sh = logging.StreamHandler(sys.stdout)
