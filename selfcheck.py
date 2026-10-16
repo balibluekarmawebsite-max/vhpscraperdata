@@ -36,12 +36,22 @@ def hr(title):
 # ---------------------------------------------------------------------------
 def check_env():
     hr("1. ENVIRONMENT (token / driver / endpoints)")
-    tok = os.environ.get("IMPORT_API_TOKEN", "")
-    jtok = os.environ.get("VHP_JOBS_TOKEN", "")
-    print("   IMPORT_API_TOKEN : {}".format(
-        "SET (length {})".format(len(tok)) if tok else "*** MISSING ***  <- uploads will fail"))
-    print("   VHP_JOBS_TOKEN   : {}".format(
-        "SET (length {})".format(len(jtok)) if jtok else "(not set — job queue reuses IMPORT_API_TOKEN)"))
+    env_tok = os.environ.get("IMPORT_API_TOKEN", "")
+    file_tok = ""
+    try:
+        file_tok = config._read_secret_file("import_token.txt", ".import_token")
+    except Exception:  # noqa: BLE001
+        pass
+    # The RESOLVED token is what the scraper actually uses (env first, then file).
+    resolved = config.UPLOAD.get("token", "")
+    where = "env var" if env_tok else ("import_token.txt file" if file_tok else "NOWHERE")
+    print("   IMPORT_API_TOKEN (env) : {}".format(
+        "set (len {})".format(len(env_tok)) if env_tok else "not set in this environment"))
+    print("   import_token.txt file  : {}".format(
+        "found (len {})".format(len(file_tok)) if file_tok else "not present"))
+    print("   -> token the scraper uses: {}".format(
+        "OK, len {} (from {})".format(len(resolved), where) if resolved
+        else "*** EMPTY — uploads WILL fail. Create import_token.txt ***"))
     drv = config.CHROMEDRIVER_PATH
     print("   chromedriver     : {}".format(
         "FOUND ({})".format(drv) if os.path.exists(drv) else "*** MISSING at {} ***".format(drv)))

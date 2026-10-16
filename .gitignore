@@ -12,9 +12,11 @@ logs/*
 chromedriver.exe
 chromedriver
 
-# Local secrets — VHP logins live here, NEVER committed.
+# Local secrets — VHP logins + the dashboard API token live here, NEVER committed.
 .env
 credentials.py
+import_token.txt
+.import_token
 
 # Python
 __pycache__/

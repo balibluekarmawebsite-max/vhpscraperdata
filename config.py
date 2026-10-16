@@ -31,6 +31,37 @@ CHROMEDRIVER_PATH = os.path.join(
     BASE, "chromedriver.exe" if os.name == "nt" else "chromedriver"
 )
 
+
+# ---------------------------------------------------------------------------
+# DASHBOARD TOKEN (resolved once, used by UPLOAD + JOBS below)
+# ---------------------------------------------------------------------------
+def _read_secret_file(*names):
+    """Read a one-line secret from the first existing git-ignored file in BASE.
+    This is the RELIABLE source for scheduled runs: Windows Task Scheduler does
+    not always inherit a setx'd user environment variable, so the daily/weekly
+    tasks can end up with an empty token even when your interactive session has
+    it. A file next to the code is read the same way by every run."""
+    for name in names:
+        p = os.path.join(BASE, name)
+        try:
+            if os.path.isfile(p):
+                with open(p, "r") as fh:
+                    val = fh.read().strip()
+                if val:
+                    return val
+        except Exception:  # noqa: BLE001
+            pass
+    return ""
+
+
+# The dashboard API token. Order of precedence:
+#   1. IMPORT_API_TOKEN environment variable (works for interactive runs)
+#   2. import_token.txt / .import_token in C:\vhp-scraper (works for EVERY run,
+#      including scheduled tasks — put the token on one line, no quotes).
+# The file is git-ignored, so the secret is never committed.
+IMPORT_API_TOKEN = (os.environ.get("IMPORT_API_TOKEN", "")
+                    or _read_secret_file("import_token.txt", ".import_token"))
+
 # ---------------------------------------------------------------------------
 # PROPERTIES
 # ---------------------------------------------------------------------------
@@ -151,7 +182,7 @@ REPORTS = [
 # commit it. (uploader.py sends field name "file" and hard-codes the contract.)
 UPLOAD = {
     "url": "https://dashboard.bluekarmasecrets.com/api/import",
-    "token": os.environ.get("IMPORT_API_TOKEN", ""),
+    "token": IMPORT_API_TOKEN,
     "timeout": 180,
     "retry_backoffs": [2, 4, 8, 16],  # seconds; retried only on network / 429 / 5xx
 }
@@ -177,7 +208,7 @@ JOBS = {
     "result_url": "https://dashboard.bluekarmasecrets.com/api/jobs/{id}/result",
     # Reuse the upload token by default (same shared secret). Set a separate
     # VHP_JOBS_TOKEN env var if you'd rather the queue use its own token.
-    "token": os.environ.get("VHP_JOBS_TOKEN", "") or os.environ.get("IMPORT_API_TOKEN", ""),
+    "token": os.environ.get("VHP_JOBS_TOKEN", "") or IMPORT_API_TOKEN,
     # A name for THIS PC in the dashboard's job records (who claimed the job).
     "worker": os.environ.get("VHP_WORKER_ID", "") or _HOSTNAME or "vhp-pc",
     "poll_interval": 120,   # seconds to wait between polls when the queue is empty
