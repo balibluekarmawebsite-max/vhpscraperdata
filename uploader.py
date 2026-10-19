@@ -54,28 +54,40 @@ def upload(path, property_code, report, cfg=None, today=None):
     if cfg is None:
         cfg = config.UPLOAD
 
-    section = report.get("section")
-    if not section:
-        raise UploadError(
-            "report {!r} has no dashboard 'section' in config — not uploading".format(
-                report.get("name")))
     token = cfg.get("token")
     if not token:
         raise UploadError(
-            "no dashboard token set — put it in the IMPORT_API_TOKEN env var "
-            "(or config.UPLOAD['token'])")
+            "no dashboard token set — put it in import_token.txt in C:\\vhp-scraper "
+            "(or the IMPORT_API_TOKEN env var)")
     if not os.path.exists(path):
         raise UploadError("file to upload not found: {}".format(path))
 
-    we = report.get("week_ending") or week_ending(today)
-    source = report.get("source") or "vhp:{}".format(report.get("name", ""))
     headers = {"Authorization": "Bearer {}".format(token)}
-    data = {
-        "property": property_code.upper(),
-        "section": section,
-        "week_ending": we,
-        "source": source,
-    }
+
+    # A report may define its OWN endpoint via report['upload'] — e.g. the
+    # cancellation report posts the raw CSV to /api/daily/cancellation with just
+    # `property` + the file (the dashboard parses + de-dups it). Otherwise we use
+    # the default /api/import contract (property/section/week_ending/source).
+    custom = report.get("upload")
+    if custom:
+        url = custom.get("url") or cfg["url"]
+        data = {"property": property_code.upper()}
+        data.update(custom.get("extra_fields", {}) or {})
+        require_ok = bool(custom.get("require_ok", False))
+    else:
+        section = report.get("section")
+        if not section:
+            raise UploadError(
+                "report {!r} has no dashboard 'section' (and no 'upload') in config "
+                "— not uploading".format(report.get("name")))
+        url = cfg["url"]
+        data = {
+            "property": property_code.upper(),
+            "section": section,
+            "week_ending": report.get("week_ending") or week_ending(today),
+            "source": report.get("source") or "vhp:{}".format(report.get("name", "")),
+        }
+        require_ok = True
 
     backoffs = cfg.get("retry_backoffs", [2, 4, 8, 16])
     attempt = 0
@@ -95,7 +107,7 @@ def upload(path, property_code, report, cfg=None, today=None):
         try:
             with open(path, "rb") as fh:
                 resp = requests.post(
-                    cfg["url"],
+                    url,
                     headers=headers,
                     data=data,
                     files={"file": (os.path.basename(path), fh, "text/csv")},
@@ -119,15 +131,25 @@ def upload(path, property_code, report, cfg=None, today=None):
                 body["_status"] = status
                 body["_timings"] = timings
                 return body
-            # 2xx but NOT the API's JSON (e.g. the Next.js app shell on a cold
-            # start right after a server restart). Treat as transient and retry;
-            # the next (warm) request returns real JSON. Only fail if it never
-            # does — so a genuine misroute isn't hidden, and data is never lost.
+            # 2xx but not {"ok": true}.
             ctype = resp.headers.get("content-type", "")
             snippet = (resp.text or "")[:140].replace("\n", " ").replace("\r", " ")
+            looks_html = "html" in ctype.lower() or (resp.text or "").lstrip()[:1] == "<"
+            if not require_ok and not looks_html:
+                # Custom endpoint (e.g. /api/daily/cancellation): accept any real
+                # 2xx — it's idempotent and may not return the {"ok":true} shape.
+                result = body if isinstance(body, dict) else {}
+                result["ok"] = True
+                result["_status"] = status
+                result["_timings"] = timings
+                return result
+            # Otherwise a 2xx that's actually the Next.js app shell (cold start
+            # after a restart). Treat as transient and retry; the next (warm)
+            # request returns real JSON. Fail only if it never does — so a genuine
+            # misroute isn't hidden, and data is never lost.
             if _retry_or_raise(
                     "got {} but not the API's JSON (content-type {!r}; likely the "
-                    "web app / cold start, not /api/import JSON). First bytes: {}"
+                    "web app / cold start). First bytes: {}"
                     .format(status, ctype, snippet),
                     status=status):
                 continue

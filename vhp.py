@@ -1249,6 +1249,51 @@ def _set_period_inner(driver, report):
     return False
 
 
+def _select_radio(driver, label):
+    """Select a Quasar radio (role='radio') by its aria-label (e.g. 'Cancel Date'
+    vs 'Check-in Date'). Returns True if selected or already selected."""
+    for xp in ("//*[@role='radio'][@aria-label={lbl!r}]".format(lbl=label),
+               "//*[@role='radio'][normalize-space(.)={lbl!r}]".format(lbl=label)):
+        for el in driver.find_elements(By.XPATH, xp):
+            try:
+                if not el.is_displayed():
+                    continue
+                if (el.get_attribute("aria-checked") or "").lower() == "true":
+                    return True  # already selected
+                _safe_click(driver, el)
+                time.sleep(0.3)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+    # Fallback: the radio nearest a text label with this value.
+    xp = ("//*[normalize-space(.)={lbl!r}]/preceding::*[@role='radio'][1] | "
+          "//*[normalize-space(.)={lbl!r}]/following::*[@role='radio'][1]").format(lbl=label)
+    for el in driver.find_elements(By.XPATH, xp):
+        try:
+            if el.is_displayed():
+                _safe_click(driver, el)
+                time.sleep(0.3)
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def select_date_mode(driver, report):
+    """If the report names a date-type radio (report['select_radio'], e.g.
+    'Cancel Date' on the cancellation report), select it BEFORE the date range is
+    set so the range filters the intended date. Non-fatal (prints and carries on)."""
+    label = report.get("select_radio")
+    if not label:
+        return
+    try:
+        ok = _select_radio(driver, label)
+        print("    (config) date-mode radio {!r} -> {}".format(
+            label, "selected" if ok else "NOT FOUND"))
+    except Exception as exc:  # noqa: BLE001
+        print("    (config) date-mode radio {!r}: {}".format(label, _describe(exc)))
+
+
 def configure_report(driver, report):
     """Best-effort: apply the report's filter settings before SEARCH.
 
@@ -1710,6 +1755,7 @@ def scrape_report(driver, prop, report, download_dir):
 
     step("open report", lambda: open_report(driver, report))
     dismiss_blocking_dialog(driver)  # clear a stale modal backdrop that blocks clicks
+    select_date_mode(driver, report)  # pick the date-type radio BEFORE setting the date
     period_ok = set_period(driver, report)  # best-effort date filter (non-fatal; prints)
     if report.get("period_required") and not period_ok:
         # Opt-in safety gate (default OFF). Once set_period is confirmed working

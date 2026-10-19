@@ -166,21 +166,38 @@ REPORTS = [
         "period_required": True,
     },
     {
-        # NEW — cancellation report. DRAFT / NOT LIVE YET: cadence "manual" keeps
-        # it OUT of the scheduled daily/weekly runs, so it won't fire (and spam
-        # failed uploads) until we finish wiring it. To go live:
-        #   1. Inspect it:  python inspect_report.py --url <url> --export
-        #      -> confirm its date control + columns, send me the sample CSV.
-        #   2. Dashboard agent builds the section + parser for cancellations.
-        #   3. Set `period` to the daily window + turn `period_required` ON.
-        #   4. Change `cadence` to "daily".
+        # NEW — cancellation report (cancelled-reservation-guest). DRAFT.
+        # Date control = the SAME V-Calendar range picker as the reservation
+        # report (data-cy="field-date", "From - Until"), so the daily window uses
+        # the existing calendar logic. It posts the RAW CSV to a dedicated
+        # endpoint (property + file); the dashboard parses + de-dups it (idempotent
+        # -> re-posting a day is safe), so we never filter rows here.
+        #
+        # cadence "manual" keeps it OUT of the scheduled runs until the remaining
+        # filter choices are confirmed; then set `period` + `period_required` and
+        # change `cadence` to "daily". Remaining TODOs:
+        #   * date-type radio (btn-option-group): "Check-in Date" (default) vs a
+        #     "Cancellation Date" option — decides what the window selects.
+        #   * reservation-status dropdown: currently "Guaranteed" -> likely "All".
+        #   * the daily window (e.g. last 7 days by cancel date; dashboard de-dups).
         "name": "cancelled-reservation-guest",
-        "cadence": "manual",   # TODO -> "daily" once verified + dashboard ready
+        "cadence": "manual",   # TODO -> "daily" once the filters below are confirmed
         "url": "https://e1-vhp.com/fr/report/cancelled-reservation-guest",
-        "section": "D",        # TODO: confirm the dashboard section for cancellations
+        "section": "D",        # for logging only — this report uses its own endpoint
         "source": "vhp:cancelled-reservation-guest",
-        "period": None,        # TODO: set the daily window once the date control is known
-        # "period_required": True,   # turn ON after set_period is confirmed for this report
+        # Custom upload endpoint (NOT /api/import): post the raw CSV + property.
+        "upload": {
+            "url": "https://dashboard.bluekarmasecrets.com/api/daily/cancellation",
+            "require_ok": False,   # idempotent endpoint; accept any 2xx
+        },
+        # Filter the date range by CANCEL DATE (not Check-in Date) — selected
+        # before the range is set. (The radio's aria-label on the page.)
+        "select_radio": "Cancel Date",
+        # Daily window: the last 7 days by cancel date, INCLUDING today, so a run
+        # never misses a day even if a previous run was skipped — the dashboard
+        # endpoint is idempotent and de-dups, so the overlap is free.
+        "period": {"days_back": 7, "include_today": True},
+        "period_required": True,   # skip rather than post a wrong-window CSV
     },
 ]
 
