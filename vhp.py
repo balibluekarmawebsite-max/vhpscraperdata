@@ -1250,48 +1250,87 @@ def _set_period_inner(driver, report):
 
 
 def _select_radio(driver, label):
-    """Select a Quasar radio (role='radio') by its aria-label (e.g. 'Cancel Date'
-    vs 'Check-in Date'). Returns True if selected or already selected."""
-    for xp in ("//*[@role='radio'][@aria-label={lbl!r}]".format(lbl=label),
-               "//*[@role='radio'][normalize-space(.)={lbl!r}]".format(lbl=label)):
-        for el in driver.find_elements(By.XPATH, xp):
+    """Select a Quasar radio (role='radio') by its aria-label OR visible text
+    (e.g. 'Cancel Date' vs 'Check-in Date'). Clicks and VERIFIES that aria-checked
+    actually flips to true (retrying, and trying the radio's inner elements, since
+    a bare click on the wrapper can be ignored). Prints a diagnostic of the radios
+    it saw if it can't match. Returns True on success."""
+    want = " ".join(label.strip().upper().split())
+
+    def _radios():
+        return [el for el in driver.find_elements(By.XPATH, "//*[@role='radio']")
+                if _disp_safe(el)]
+
+    # The filter panel can hydrate a moment after the SEARCH button appears.
+    end = time.time() + 15
+    while time.time() < end and not _radios():
+        time.sleep(0.4)
+
+    def _label_of(el):
+        try:
+            al = " ".join((el.get_attribute("aria-label") or "").upper().split())
+            tx = " ".join((el.text or "").upper().split())
+            return al, tx
+        except Exception:  # noqa: BLE001
+            return "", ""
+
+    def _find():
+        for el in _radios():
+            al, tx = _label_of(el)
+            if want == al or want == tx or (al and want in al) or (tx and want in tx):
+                return el
+        return None
+
+    def _checked(el):
+        try:
+            return (el.get_attribute("aria-checked") or "").lower() == "true"
+        except Exception:  # noqa: BLE001
+            return False
+
+    target = _find()
+    if target is None:
+        print("    (config) radio {!r} NOT FOUND — radios seen: {}".format(
+            label, [_label_of(el) for el in _radios()]))
+        return False
+    if _checked(target):
+        return True
+
+    candidates = [target]
+    try:
+        candidates += target.find_elements(
+            By.CSS_SELECTOR, ".q-radio__inner, .q-radio__bg, .q-radio__label")
+    except Exception:  # noqa: BLE001
+        pass
+    for _ in range(3):
+        for c in candidates:
             try:
-                if not el.is_displayed():
-                    continue
-                if (el.get_attribute("aria-checked") or "").lower() == "true":
-                    return True  # already selected
-                _safe_click(driver, el)
-                time.sleep(0.3)
-                return True
+                _force_click(driver, c)
             except Exception:  # noqa: BLE001
                 continue
-    # Fallback: the radio nearest a text label with this value.
-    xp = ("//*[normalize-space(.)={lbl!r}]/preceding::*[@role='radio'][1] | "
-          "//*[normalize-space(.)={lbl!r}]/following::*[@role='radio'][1]").format(lbl=label)
-    for el in driver.find_elements(By.XPATH, xp):
-        try:
-            if el.is_displayed():
-                _safe_click(driver, el)
-                time.sleep(0.3)
+            time.sleep(0.4)
+            tgt = _find() or target
+            if _checked(tgt):
                 return True
-        except Exception:  # noqa: BLE001
-            continue
-    return False
+    return _checked(_find() or target)
 
 
 def select_date_mode(driver, report):
     """If the report names a date-type radio (report['select_radio'], e.g.
     'Cancel Date' on the cancellation report), select it BEFORE the date range is
-    set so the range filters the intended date. Non-fatal (prints and carries on)."""
+    set so the range filters the intended date. Returns True if selected (or none
+    needed), False if it was needed but couldn't be selected — the caller gates on
+    that so we never upload a CSV filtered by the wrong date."""
     label = report.get("select_radio")
     if not label:
-        return
+        return True
     try:
         ok = _select_radio(driver, label)
         print("    (config) date-mode radio {!r} -> {}".format(
-            label, "selected" if ok else "NOT FOUND"))
+            label, "selected" if ok else "NOT selected (see diagnostic above)"))
+        return ok
     except Exception as exc:  # noqa: BLE001
         print("    (config) date-mode radio {!r}: {}".format(label, _describe(exc)))
+        return False
 
 
 def configure_report(driver, report):
@@ -1755,7 +1794,11 @@ def scrape_report(driver, prop, report, download_dir):
 
     step("open report", lambda: open_report(driver, report))
     dismiss_blocking_dialog(driver)  # clear a stale modal backdrop that blocks clicks
-    select_date_mode(driver, report)  # pick the date-type radio BEFORE setting the date
+    radio_ok = select_date_mode(driver, report)  # pick the date-type radio BEFORE the date
+    if report.get("select_radio") and not radio_ok:
+        raise RuntimeError(
+            "[date mode] required radio {!r} not selected — skipping report to avoid "
+            "a CSV filtered by the wrong date".format(report.get("select_radio")))
     period_ok = set_period(driver, report)  # best-effort date filter (non-fatal; prints)
     if report.get("period_required") and not period_ok:
         # Opt-in safety gate (default OFF). Once set_period is confirmed working
