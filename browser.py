@@ -71,6 +71,28 @@ def make_driver(profile_dir, download_dir, headless=False):
     return driver
 
 
+def _ensure_min_width(driver, min_width):
+    """Ensure the attached window is at least `min_width` px wide, WITHOUT
+    activating it (no focus steal, no pop-to-front). Uses CDP setWindowBounds,
+    which only changes geometry. A window the user already keeps wide or
+    maximized is left completely untouched — so the bot stays in the background
+    and never interrupts other work on the PC."""
+    try:
+        info = driver.execute_cdp_cmd("Browser.getWindowForTarget", {})
+        bounds = info.get("bounds", {}) or {}
+        state = bounds.get("windowState", "normal")
+        if state in ("maximized", "fullscreen"):
+            return  # already wide; leave it exactly as the user has it
+        if (bounds.get("width") or 0) >= min_width:
+            return  # already wide enough
+        driver.execute_cdp_cmd("Browser.setWindowBounds", {
+            "windowId": info.get("windowId"),
+            "bounds": {"width": 1600, "height": 1000, "windowState": "normal"},
+        })
+    except Exception:  # noqa: BLE001 - a resize hiccup must never break the attach
+        pass
+
+
 def kill_stale_chromedrivers():
     """Windows: end leftover chromedriver.exe from previous attached runs.
     Does NOT touch chrome.exe, so the user's open VHP windows are untouched."""
@@ -98,12 +120,11 @@ def make_driver_attached(debug_port, download_dir):
     driver = webdriver.Chrome(service=service, options=opts)
     driver.set_page_load_timeout(60)
 
-    # Keep the window wide so the responsive filter panel stays expanded
-    # (a narrow window — e.g. with DevTools docked — collapses it).
-    try:
-        driver.maximize_window()
-    except Exception:  # noqa: BLE001
-        pass
+    # Make sure the window is wide enough for the filter panel, but WITHOUT
+    # stealing focus or popping it to the foreground — so the bot never disturbs
+    # whatever else you're doing on the PC. (We used to maximize on every attach,
+    # which could pull windows forward every few minutes.)
+    _ensure_min_width(driver, 1280)
 
     # Send downloads to our folder for this session (the window's own default
     # download dir is left unchanged).
