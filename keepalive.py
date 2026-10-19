@@ -25,7 +25,9 @@ same window from two places at once.
 import argparse
 import logging
 import os
+import subprocess
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 
 import config
@@ -97,6 +99,34 @@ def touch_property(logger, prop, report, do_search):
     # No driver.quit() — leave the user's VHP window open.
 
 
+def _notify_logged_out(logger, codes):
+    """Pop a small, auto-dismissing desktop message when a VHP window is logged
+    out, so a human knows to re-login (type the CAPTCHA). Rate-limited to once per
+    30 min so it's never spammy, and it closes itself after 60s so it doesn't
+    block other work. Windows only; best-effort."""
+    if os.name != "nt" or not codes:
+        return
+    stamp = os.path.join(config.LOGS_DIR, ".last_logout_alert")
+    try:
+        if os.path.exists(stamp) and (time.time() - os.path.getmtime(stamp)) < 1800:
+            return  # alerted recently — don't nag
+    except OSError:
+        pass
+    text = ("VHP is logged out: {}.  Please open the Chrome window(s) and log in "
+            "(type the CAPTCHA). The scraper can't pull data until you do."
+            .format(", ".join(c.upper() for c in codes)))
+    try:
+        vbs = os.path.join(config.LOGS_DIR, "_logout_alert.vbs")
+        with open(vbs, "w") as fh:
+            fh.write('CreateObject("WScript.Shell").Popup "{}", 60, "VHP Scraper", 48'
+                     .format(text.replace('"', '""')))
+        subprocess.Popen(["wscript", vbs])  # non-blocking; auto-closes after 60s
+        with open(stamp, "w") as fh:
+            fh.write(str(int(time.time())))
+    except Exception as exc:  # noqa: BLE001 - a notification must never break keep-alive
+        logger.warning("could not show logout notification: %s", exc)
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description="Keep the VHP sessions logged in")
     parser.add_argument("--search", action="store_true",
@@ -123,11 +153,13 @@ def main(argv):
         lock.release()
 
     oks = sum(1 for v in results.values() if v == "ok")
-    out = sum(1 for v in results.values() if v == "logged_out")
+    logged_out = [c for c, v in results.items() if v == "logged_out"]
     logger.info("keep-alive done: %d alive, %d logged-out, %d error | %s",
-                oks, out, len(results) - oks - out, results)
+                oks, len(logged_out), len(results) - oks - len(logged_out), results)
+    if logged_out:
+        _notify_logged_out(logger, logged_out)  # tell the human to re-login
     # Non-zero exit if any window is logged out, so Task Scheduler can flag it.
-    return 1 if out else 0
+    return 1 if logged_out else 0
 
 
 if __name__ == "__main__":
