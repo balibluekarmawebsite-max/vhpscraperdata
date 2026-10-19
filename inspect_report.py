@@ -1,19 +1,20 @@
 """
 inspect_report.py — one-off helper to SEE a report's filter/date controls.
 
-Read-only: it attaches to a property's Chrome window, opens a report, and prints
-the filter fields (labels, data-cy, values) + any date control it finds. It does
-NOT press SEARCH, export, or change anything. We use it to work out how to drive
-a control we haven't wired yet — e.g. picking a specific month on the
-yearly-forecast report (so "section B for a past month" can be enabled).
+It attaches to a property's Chrome window, opens a report, and prints the filter
+fields (labels, data-cy, values) + any date control it finds. We use it to work
+out how to drive a control we haven't wired yet — e.g. a NEW report (cancellation
+report) before adding it to config.
 
-    python inspect_report.py            # inspects section B (yearly-forecast) on BKDS
-    python inspect_report.py C          # inspects section C (reservation) on BKDS
-    python inspect_report.py B BKDU     # section B on BKDU
+    python inspect_report.py B                      # existing section B (yearly-forecast)
+    python inspect_report.py C --code bkdu          # existing section C on BKDU
+    python inspect_report.py --url <report-url>     # a NEW report, by its URL
+    python inspect_report.py --url <report-url> --export   # also save a sample CSV (no upload)
 
-Send me everything it prints.
+--export additionally presses SEARCH and saves one CSV locally (NOT uploaded), so
+we can see the report's columns. Send me everything it prints (and the CSV).
 """
-import sys
+import argparse
 import time
 
 import config
@@ -58,20 +59,28 @@ return out.slice(0, 60).join('\n');
 
 
 def main(argv):
-    section = (argv[0] if len(argv) > 0 else "B").upper()
-    code = (argv[1] if len(argv) > 1 else "bkds").lower()
+    parser = argparse.ArgumentParser(description="Inspect a VHP report's filter/date controls.")
+    parser.add_argument("section", nargs="?", help="existing section to inspect: B or C")
+    parser.add_argument("--url", help="inspect ANY report by URL (for a report not yet in config)")
+    parser.add_argument("--code", default="bkds", help="which property window to use (default bkds)")
+    parser.add_argument("--export", action="store_true",
+                        help="also press SEARCH and save ONE sample CSV locally (NOT uploaded)")
+    args = parser.parse_args(argv)
 
-    report = config.report_by_section(section)
-    if report is None:
-        print("no report for section {!r} (use B or C)".format(section))
+    if args.url:
+        report = {"name": "adhoc-inspect", "url": args.url, "section": None}
+    elif args.section:
+        report = config.report_by_section(args.section.upper())
+        if report is None:
+            print("no report for section {!r} (use B or C, or pass --url)".format(args.section))
+            return 2
+    else:
+        print("usage: inspect_report.py <B|C>   OR   inspect_report.py --url <report-url> [--export]")
         return 2
-    prop = None
-    for p in config.PROPERTIES:
-        if p["code"].lower() == code:
-            prop = p
-            break
+
+    prop = next((p for p in config.PROPERTIES if p["code"].lower() == args.code.lower()), None)
     if prop is None:
-        print("no property {!r}".format(code))
+        print("no property {!r} (use bkds/bkdu/bkv)".format(args.code))
         return 2
 
     lock = RunLock(config.RUN_LOCK_PATH)
@@ -96,7 +105,7 @@ def main(argv):
             print("FOUND. current value: {!r}".format(vhp._date_field_value(driver, f)))
             print("HTML:\n" + vhp._el_html(driver, f, 2500))
         else:
-            print("no 'Date' field matched — this report uses a different control.")
+            print("no 'Date' field matched — this report uses a different control (see below).")
 
         print("\n===== PAGE DIAG (all inputs + date-looking text) =====")
         print(vhp._dump_date_diag(driver))
@@ -106,9 +115,34 @@ def main(argv):
             print(driver.execute_script(_DUMP_CONTROLS_JS))
         except Exception as exc:  # noqa: BLE001
             print("controls dump failed: {}".format(exc))
+
+        if args.export:
+            print("\n===== SAMPLE CSV (press SEARCH + export; NOT uploaded) =====")
+            try:
+                # Re-assert the download dir (navigation can reset it).
+                for _cmd in ("Browser.setDownloadBehavior", "Page.setDownloadBehavior"):
+                    try:
+                        driver.execute_cdp_cmd(_cmd, {"behavior": "allow",
+                                                      "downloadPath": config.DOWNLOADS_DIR})
+                    except Exception:  # noqa: BLE001
+                        pass
+                vhp.configure_report(driver, report)      # no-op unless the report has filters
+                vhp.click_search(driver)
+                vhp.wait_for_report_data(driver)
+                time.sleep(1)
+                before = vhp.snapshot_dirs(config.DOWNLOAD_WATCH)
+                since = time.time()
+                vhp.export_print_csv(driver)
+                raw = vhp.wait_for_download(config.DOWNLOAD_WATCH, before=before, since=since)
+                dest = vhp.rename_download(raw, prop["code"], "sample-inspect", config.DOWNLOADS_DIR)
+                print("SAVED (not uploaded): {}".format(dest))
+                print("Open that CSV and send it to me — I'll read the columns for the config + "
+                      "your dashboard agent's parser.")
+            except Exception as exc:  # noqa: BLE001
+                print("export failed: {}".format(vhp._describe(exc)))
     finally:
         lock.release()
-    print("\n----- done (nothing was changed). Send me everything above. -----")
+    print("\n----- done (nothing was uploaded; VHP unchanged). Send me everything above. -----")
     return 0
 
 
