@@ -165,6 +165,23 @@ REPORTS = [
         # with VHP's default (wrong) window.
         "period_required": True,
     },
+    {
+        # NEW — cancellation report. DRAFT / NOT LIVE YET: cadence "manual" keeps
+        # it OUT of the scheduled daily/weekly runs, so it won't fire (and spam
+        # failed uploads) until we finish wiring it. To go live:
+        #   1. Inspect it:  python inspect_report.py --url <url> --export
+        #      -> confirm its date control + columns, send me the sample CSV.
+        #   2. Dashboard agent builds the section + parser for cancellations.
+        #   3. Set `period` to the daily window + turn `period_required` ON.
+        #   4. Change `cadence` to "daily".
+        "name": "cancelled-reservation-guest",
+        "cadence": "manual",   # TODO -> "daily" once verified + dashboard ready
+        "url": "https://e1-vhp.com/fr/report/cancelled-reservation-guest",
+        "section": "D",        # TODO: confirm the dashboard section for cancellations
+        "source": "vhp:cancelled-reservation-guest",
+        "period": None,        # TODO: set the daily window once the date control is known
+        # "period_required": True,   # turn ON after set_period is confirmed for this report
+    },
 ]
 
 # ---------------------------------------------------------------------------
