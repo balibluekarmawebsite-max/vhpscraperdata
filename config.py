@@ -193,10 +193,10 @@ REPORTS = [
         # Filter the date range by CANCEL DATE (not Check-in Date) — selected
         # before the range is set. (The radio's aria-label on the page.)
         "select_radio": "Cancel Date",
-        # Daily window: the last 7 days by cancel date, INCLUDING today, so a run
-        # never misses a day even if a previous run was skipped — the dashboard
-        # endpoint is idempotent and de-dups, so the overlap is free.
-        "period": {"days_back": 7, "include_today": True},
+        # Daily window: YESTERDAY only, by cancel date. The 6am run pulls the
+        # previous (complete) day's cancellations — e.g. run on 19 Oct -> cancel
+        # date 18/10..18/10. (days_back=1, include_today=False -> today-1..today-1.)
+        "period": {"days_back": 1, "include_today": False},
         "period_required": True,   # skip rather than post a wrong-window CSV
     },
 ]
