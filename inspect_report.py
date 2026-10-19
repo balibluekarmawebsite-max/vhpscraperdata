@@ -15,6 +15,7 @@ report) before adding it to config.
 we can see the report's columns. Send me everything it prints (and the CSV).
 """
 import argparse
+import sys
 import time
 
 import config
