@@ -18,6 +18,7 @@ import os
 import re
 import time
 
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
@@ -203,6 +204,56 @@ def _has_captcha(driver):
     return False
 
 
+def _is_crash_page(driver):
+    """True if the tab is showing Chrome's OWN crash/error page — e.g. the
+    'Aw, Snap! Out of Memory' page — rather than the VHP app. A long-lived VHP
+    window on a low-RAM PC can OOM-crash its renderer; Chrome then parks the tab
+    on a chrome-error:// page until someone clicks Reload."""
+    try:
+        if (driver.current_url or "").startswith("chrome-error://"):
+            return True
+    except WebDriverException:
+        return True  # can't even read the URL -> the tab is gone/crashed
+    try:
+        src = (driver.page_source or "")[:4000].lower()
+    except WebDriverException:
+        return True
+    return ("aw, snap" in src or "err_out_of_memory" in src
+            or "error code: out of memory" in src)
+
+
+def _safe_get(driver, url, tries=2):
+    """Navigate to url, auto-recovering from a crashed ('Aw, Snap!') tab.
+
+    Normally a human has to click Reload after an OOM crash. This does it for
+    us: if the navigation throws (renderer died mid-load) or lands on Chrome's
+    own error page, we wait a moment and reload once more. By the second try the
+    renderer has been re-spawned, so the VHP page loads and the scrape/keep-alive
+    carries on instead of failing. If it's STILL crashed after the last try we
+    raise, so the caller logs a real crash rather than mislabelling it a logout."""
+    last_exc = None
+    for attempt in range(1, tries + 1):
+        try:
+            driver.get(url)
+        except WebDriverException as exc:  # renderer crashed mid-navigation
+            last_exc = exc
+            time.sleep(2)
+            continue
+        if _is_crash_page(driver):
+            last_exc = None
+            if attempt < tries:
+                time.sleep(2)
+                continue
+            raise WebDriverException(
+                "tab is on Chrome's crash page after {} load attempt(s) "
+                "(likely 'Aw, Snap! Out of Memory') — the window needs a reload "
+                "or the PC is low on memory".format(tries))
+        return  # loaded the real page
+    # Out of retries after navigation kept throwing — surface the last error.
+    raise last_exc if last_exc is not None else WebDriverException(
+        "could not navigate to {}".format(url))
+
+
 def ensure_logged_in(driver, prop, creds, probe_url):
     """Ensure we're logged in, reusing a saved session when possible.
 
@@ -213,7 +264,7 @@ def ensure_logged_in(driver, prop, creds, probe_url):
          runs login.py once, solves the CAPTCHA, and the session is reused.
        * Else fill the username/password and submit.
     """
-    driver.get(probe_url)
+    _safe_get(driver, probe_url)  # recovers a crashed ('Aw, Snap!') tab
     time.sleep(3)  # let the SPA render (app or login form)
 
     if _session_expired(driver):
@@ -269,7 +320,7 @@ def open_report(driver, report):
     always shows a form): if the SEARCH button appears we're in; if a login
     field appears we were bounced to login -> raise LoginRequired.
     """
-    driver.get(report["url"])
+    _safe_get(driver, report["url"])  # recovers a crashed ('Aw, Snap!') tab
     end = time.time() + 40
     while time.time() < end:
         # Check the 'session expired' dialog FIRST — a stale report may still be
