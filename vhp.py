@@ -702,6 +702,32 @@ def ensure_logged_in(driver, prop, creds, probe_url):
         "'{code}' Chrome window.".format(code=prop["code"]))
 
 
+def refresh_page(driver, settle=3.0):
+    """Hard-reload the current page to keep the VHP session alive.
+
+    A plain reload/navigation can be served from the browser cache WITHOUT really
+    contacting VHP, so it may not reset VHP's inactivity timer. This does a
+    cache-BYPASSING reload (CDP Page.reload with ignoreCache) so the browser truly
+    re-contacts the server and the SPA re-authenticates with the saved cookie — the
+    authenticated round-trip that actually keeps the session logged in. It also
+    flushes the page's accumulated memory, which helps avoid the 'Aw, Snap! Out of
+    Memory' crash. Crash-safe and never raises (keep-alive must stay best-effort)."""
+    try:
+        driver.execute_cdp_cmd("Page.reload", {"ignoreCache": True})
+    except Exception:  # noqa: BLE001 - CDP cmd unavailable -> ordinary reload
+        try:
+            driver.refresh()
+        except WebDriverException:
+            return
+    time.sleep(settle)  # let the reload fetch + the SPA re-bootstrap
+    try:
+        if _is_crash_page(driver):  # the reload itself OOM-crashed the tab -> recover
+            driver.refresh()
+            time.sleep(settle)
+    except WebDriverException:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # per-report steps
 # ---------------------------------------------------------------------------

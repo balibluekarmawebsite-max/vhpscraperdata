@@ -3,16 +3,21 @@ keepalive.py — stop the 3 VHP sessions from timing out.
 
 The scraper attaches to Chrome windows you logged into by hand. If a window sits
 idle too long, VHP logs the account out and the next scrape fails with "not
-logged in". This script gives each window a light, authenticated nudge on a timer
-(Task Scheduler, ~hourly) so VHP's inactivity clock keeps resetting and the
-account stays logged in.
+logged in". This script, run on a timer (Task Scheduler, every ~5 min), keeps each
+window's session warm so VHP's inactivity clock keeps resetting.
 
-    python keepalive.py            # navigate each window to a report page and
-                                   #   confirm it's still logged in (the light
-                                   #   default — one authenticated page load)
-    python keepalive.py --search   # ALSO press SEARCH (a guaranteed server
-                                   #   round-trip) — use this if plain navigation
-                                   #   turns out not to be enough to keep VHP alive
+    python keepalive.py            # confirm logged in, then HARD-REFRESH the page
+                                   #   (a cache-bypassing reload = a real
+                                   #   authenticated round-trip to VHP). This is
+                                   #   what resets VHP's timer, and it also flushes
+                                   #   page memory (helps the 'Aw, Snap!' crash).
+    python keepalive.py --search   # ALSO press SEARCH (an even heavier guaranteed
+                                   #   server round-trip) — use it only if the hard
+                                   #   refresh still isn't enough to keep VHP alive.
+
+Run it every 5 minutes (the Task Scheduler "VHP Keep-Alive" task); no code change
+is needed to pick this up — just `git pull` and the existing task does the hard
+refresh from its next run.
 
 It does NOT export or upload anything — it only touches the page so the session
 stays warm.
@@ -35,7 +40,7 @@ from browser import kill_stale_chromedrivers, make_driver_attached
 from runlock import RunLock
 from vhp import (LoginRequired, _captcha_reset, _on_login_url, _read_login_state,
                  attempt_auto_login, click_search, dismiss_session_expired,
-                 open_report, wait_for_report_data)
+                 open_report, refresh_page, wait_for_report_data)
 
 
 def setup_logging():
@@ -122,16 +127,24 @@ def touch_property(logger, prop, report, do_search):
 
         _captcha_reset(prop)  # confirmed logged-in -> re-arm auto-login for next time
 
+        # The keep-alive itself: a cache-bypassing hard refresh forces a fresh,
+        # authenticated round-trip to VHP (what actually resets its inactivity
+        # timer) and flushes page memory. This is the 5-min "refresh" that keeps the
+        # session logged in.
+        refresh_page(driver)
+
         if do_search:
             try:
                 click_search(driver)
                 wait_for_report_data(driver, timeout=30)
-                logger.info("[%s] session kept alive (page + SEARCH round-trip ok)", prop["code"])
+                logger.info("[%s] session kept alive (hard refresh + SEARCH round-trip ok)",
+                            prop["code"])
             except Exception as exc:  # noqa: BLE001 - SEARCH is best-effort here
-                logger.info("[%s] page loaded + logged in; SEARCH didn't finish "
+                logger.info("[%s] hard-refreshed + logged in; SEARCH didn't finish "
                             "(fine for keep-alive): %s", prop["code"], _describe(exc))
         else:
-            logger.info("[%s] session kept alive (report page loaded, logged in)", prop["code"])
+            logger.info("[%s] session kept alive (page hard-refreshed, logged in)",
+                        prop["code"])
         return "ok"
     except Exception as exc:  # noqa: BLE001 - isolate per-property failures
         logger.warning("[%s] keep-alive error: %s", prop["code"], _describe(exc))
@@ -170,8 +183,9 @@ def _notify_logged_out(logger, codes):
 def main(argv):
     parser = argparse.ArgumentParser(description="Keep the VHP sessions logged in")
     parser.add_argument("--search", action="store_true",
-                        help="also press SEARCH (a guaranteed server round-trip) — "
-                             "use if plain navigation isn't enough to keep VHP alive")
+                        help="after the hard refresh, ALSO press SEARCH (an even "
+                             "heavier round-trip) — use only if the hard refresh "
+                             "alone isn't enough to keep VHP alive")
     args = parser.parse_args(argv)
 
     logger = setup_logging()
