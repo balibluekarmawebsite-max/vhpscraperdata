@@ -35,18 +35,45 @@ CHROMEDRIVER_PATH = os.path.join(
 # ---------------------------------------------------------------------------
 # DASHBOARD TOKEN (resolved once, used by UPLOAD + JOBS below)
 # ---------------------------------------------------------------------------
+def _clean_secret(val):
+    """Tidy a pasted secret so a small editing slip doesn't silently break auth
+    (the usual cause of HTTP 401 'invalid token'): take the first real line, drop a
+    leading 'export '/'KEY=' assignment and surrounding quotes. A real token's own
+    base64 '=' padding is at the END, and we only strip a leading NAME= whose name
+    looks like a token var, so this never eats part of the token."""
+    if not val:
+        return val
+    for line in val.splitlines():  # first non-empty, non-comment line
+        line = line.strip()
+        if line and not line.startswith("#"):
+            val = line
+            break
+    if val.lower().startswith("export "):
+        val = val[len("export "):].strip()
+    import re as _re
+    m = _re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", val)
+    if m and any(k in m.group(1).upper() for k in ("TOKEN", "KEY", "SECRET", "API")):
+        val = m.group(2).strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+        val = val[1:-1].strip()
+    return val
+
+
 def _read_secret_file(*names):
     """Read a one-line secret from the first existing git-ignored file in BASE.
     This is the RELIABLE source for scheduled runs: Windows Task Scheduler does
     not always inherit a setx'd user environment variable, so the daily/weekly
     tasks can end up with an empty token even when your interactive session has
-    it. A file next to the code is read the same way by every run."""
+    it. A file next to the code is read the same way by every run.
+
+    Read as utf-8-sig so a BOM that Notepad may add on save is stripped (a BOM
+    silently corrupts the token -> 401), then _clean_secret() tidies quotes/prefix."""
     for name in names:
         p = os.path.join(BASE, name)
         try:
             if os.path.isfile(p):
-                with open(p, "r") as fh:
-                    val = fh.read().strip()
+                with open(p, "r", encoding="utf-8-sig") as fh:
+                    val = _clean_secret(fh.read().strip())
                 if val:
                     return val
         except Exception:  # noqa: BLE001
