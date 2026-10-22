@@ -110,6 +110,7 @@ def upload(path, property_code, report, cfg=None, today=None):
     # feed: the Yearly-Forecast CSV is also POSTed to /api/daily/pickup with
     # `property` + `snapshotDate=<today>`. One pull, N posts, per property per run.
     # An extra that fails (after retries) raises, so a broken feed is never silent.
+    extra_posts = []
     for extra in (report.get("extra_uploads") or []):
         e_url = extra.get("url")
         if not e_url:
@@ -117,7 +118,11 @@ def upload(path, property_code, report, cfg=None, today=None):
         e_token = _resolve_token(extra, cfg)
         e_data = {"property": property_code.upper()}
         e_data.update(_sub_today(extra.get("extra_fields"), today))
-        _post_file(path, e_url, e_token, e_data, bool(extra.get("require_ok", False)), cfg)
+        e_res = _post_file(path, e_url, e_token, e_data,
+                           bool(extra.get("require_ok", False)), cfg)
+        extra_posts.append({"url": e_url, "status": e_res.get("_status")})
+    if extra_posts and isinstance(result, dict):
+        result["_extra_posts"] = extra_posts
 
     return result
 

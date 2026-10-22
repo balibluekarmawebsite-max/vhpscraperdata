@@ -113,6 +113,9 @@ def run_property(logger, prop, reports):
                 logger.info("[%s] uploaded -> section %s, week %s (%s)",
                             tag, report.get("section"), result.get("week_ending"),
                             result.get("message") or "HTTP {}".format(result.get("_status")))
+                for ep in result.get("_extra_posts", []):
+                    logger.info("[%s] also posted -> %s (HTTP %s)",
+                                tag, ep["url"], ep["status"])
                 ok += 1
             except LoginRequired:
                 logger.error("[%s] session dropped — log into its VHP window again",

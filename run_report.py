@@ -56,6 +56,8 @@ def main(argv):
                 result = upload(path, prop["code"], report)
                 print("  uploaded -> HTTP {} ({})".format(
                     result.get("_status"), result.get("message") or "ok"))
+                for ep in result.get("_extra_posts", []):
+                    print("  + also posted -> {} (HTTP {})".format(ep["url"], ep["status"]))
                 ok += 1
             except LoginRequired as exc:
                 print("  LOGIN REQUIRED: {}".format(exc))
