@@ -39,6 +39,25 @@ def week_ending(today=None):
 _RETRY_STATUS = (429, 500, 502, 503, 504)
 
 
+def _resolve_token(custom, cfg):
+    """The auth token for a custom upload endpoint. Prefer the endpoint's OWN token
+    (literal `token`, env var named by `token_env`, or git-ignored file named by
+    `token_file`); fall back to the shared /api/import token. This lets an endpoint
+    like /api/daily/cancellation use a DIFFERENT token when it rejects the import
+    one (HTTP 401)."""
+    if custom.get("token"):
+        return custom["token"]
+    env = custom.get("token_env")
+    if env and os.environ.get(env):
+        return os.environ[env].strip()
+    fname = custom.get("token_file")
+    if fname:
+        val = config._read_secret_file(fname)
+        if val:
+            return val
+    return cfg.get("token")
+
+
 def upload(path, property_code, report, cfg=None, today=None):
     """Upload one report file to the dashboard import API.
 
@@ -54,23 +73,19 @@ def upload(path, property_code, report, cfg=None, today=None):
     if cfg is None:
         cfg = config.UPLOAD
 
-    token = cfg.get("token")
-    if not token:
-        raise UploadError(
-            "no dashboard token set — put it in import_token.txt in C:\\vhp-scraper "
-            "(or the IMPORT_API_TOKEN env var)")
     if not os.path.exists(path):
         raise UploadError("file to upload not found: {}".format(path))
 
-    headers = {"Authorization": "Bearer {}".format(token)}
-
     # A report may define its OWN endpoint via report['upload'] — e.g. the
     # cancellation report posts the raw CSV to /api/daily/cancellation with just
-    # `property` + the file (the dashboard parses + de-dups it). Otherwise we use
-    # the default /api/import contract (property/section/week_ending/source).
+    # `property` + the file (the dashboard parses + de-dups it). A custom endpoint
+    # may also name its OWN auth token (token / token_env / token_file); otherwise
+    # we use the shared /api/import contract (property/section/week_ending/source)
+    # and the shared token.
     custom = report.get("upload")
     if custom:
         url = custom.get("url") or cfg["url"]
+        token = _resolve_token(custom, cfg)
         data = {"property": property_code.upper()}
         data.update(custom.get("extra_fields", {}) or {})
         require_ok = bool(custom.get("require_ok", False))
@@ -81,6 +96,7 @@ def upload(path, property_code, report, cfg=None, today=None):
                 "report {!r} has no dashboard 'section' (and no 'upload') in config "
                 "— not uploading".format(report.get("name")))
         url = cfg["url"]
+        token = cfg.get("token")
         data = {
             "property": property_code.upper(),
             "section": section,
@@ -88,6 +104,13 @@ def upload(path, property_code, report, cfg=None, today=None):
             "source": report.get("source") or "vhp:{}".format(report.get("name", "")),
         }
         require_ok = True
+
+    if not token:
+        raise UploadError(
+            "no dashboard token for {} — put it in import_token.txt in C:\\vhp-scraper "
+            "(or set the report's upload.token_file / token_env)".format(url))
+
+    headers = {"Authorization": "Bearer {}".format(token)}
 
     backoffs = cfg.get("retry_backoffs", [2, 4, 8, 16])
     attempt = 0

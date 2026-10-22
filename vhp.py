@@ -1819,20 +1819,33 @@ def configure_report(driver, report):
     """Best-effort: apply the report's filter settings before SEARCH.
 
     Optional report fields in config.py:
+        dropdowns:       {"Reservation Status": "Guaranteed", "Room Type": "All"}
+                                                     -> set each single-select
         checkboxes:      {"Show Revenue": True}      -> set each checkbox
         segment_untick:  ["Complimentary", "House Use"]  -> de-select in Segment Code
 
     Never raises — it prints what it did (or couldn't) and the scrape carries on.
     """
-    if not (report.get("checkboxes") or report.get("segment_untick")):
+    if not (report.get("dropdowns") or report.get("checkboxes")
+            or report.get("segment_untick")):
         return
     # Wait for the left filter panel to render (it can lag behind SEARCH).
     end = time.time() + 20
     while time.time() < end:
-        if driver.find_elements(By.CSS_SELECTOR, "[data-cy='{}']".format(_SEGMENT_CY)) or \
-                driver.find_elements(By.XPATH, "//*[contains(@class,'q-checkbox')]"):
+        if (driver.find_elements(By.CSS_SELECTOR, "[data-cy='{}']".format(_SEGMENT_CY))
+                or driver.find_elements(By.XPATH, "//*[contains(@class,'q-checkbox')]")
+                or driver.find_elements(By.CSS_SELECTOR, "label.q-select, label.q-field")):
             break
         time.sleep(0.5)
+
+    for label, value in (report.get("dropdowns") or {}).items():
+        try:
+            changed = _select_dropdown(driver, label, value)
+            print("    (config) dropdown {!r} -> {!r}{}".format(
+                label, value, "" if changed else " (already)"))
+        except Exception as exc:  # noqa: BLE001 - best-effort; default usually matches
+            print("    (config) dropdown {!r} -> {!r}: {}".format(
+                label, value, _describe(exc)))
 
     for label, want in (report.get("checkboxes") or {}).items():
         try:
@@ -1848,6 +1861,101 @@ def configure_report(driver, report):
             _segment_untick(driver, labels)
         except Exception as exc:  # noqa: BLE001
             print("    (config) Segment Code untick {}: {}".format(labels, _describe(exc)))
+
+
+def _pick_field(hits):
+    """Of several matching field wrappers, the one with the LEAST text — i.e. the
+    innermost/most specific match (just label + value, not surrounding panel)."""
+    best = None
+    best_len = None
+    for el in hits:
+        try:
+            tlen = len((el.text or ""))
+        except Exception:  # noqa: BLE001
+            tlen = 10 ** 9
+        if best is None or tlen < best_len:
+            best, best_len = el, tlen
+    return best
+
+
+def _dropdown_field(driver, label):
+    """Find the single-select Quasar dropdown (q-select) whose label matches
+    `label` (e.g. 'Reservation Status'). Returns the clickable field or None."""
+    want = label.upper()
+    for cls in ("q-select", "q-field"):
+        xp = ("//label[contains(@class,'{cls}')]"
+              "[contains(translate(normalize-space(.),'{lo}','{up}'), {w!r})]"
+              ).format(cls=cls, lo=_LOWER, up=_UPPER, w=want)
+        hits = [e for e in driver.find_elements(By.XPATH, xp) if _disp_safe(e)]
+        if hits:
+            return _pick_field(hits)
+    return None
+
+
+def _dropdown_value(driver, field):
+    try:
+        return (field.text or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _dropdown_labels_diag(driver):
+    """Print the dropdown field labels actually on the page — so when a label isn't
+    found we can see what to target (same idea as the radio/segment diagnostics)."""
+    try:
+        labels = driver.execute_script(
+            "var out=[];document.querySelectorAll("
+            "'label.q-select .q-field__label, label.q-field .q-field__label')"
+            ".forEach(function(e){var t=(e.textContent||'').trim();if(t)out.push(t);});"
+            "return out.slice(0,40);")
+        print("    (config) dropdowns on page: {}".format(labels))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _select_dropdown(driver, label, value):
+    """Set a single-select Quasar dropdown (found by its label) to `value`
+    (e.g. 'Reservation Status' -> 'Guaranteed'). Returns True if it changed, False
+    if already set. Raises RuntimeError if the field/option can't be found (the
+    caller logs it; the scrape carries on — the default usually already matches)."""
+    field = _dropdown_field(driver, label)
+    if field is None:
+        _dropdown_labels_diag(driver)
+        raise RuntimeError("dropdown {!r} not found".format(label))
+    if value.upper() in _dropdown_value(driver, field).upper():
+        return False  # already showing the wanted value
+    # Open it (retry until the q-menu renders).
+    opened = False
+    for _ in range(3):
+        _safe_click(driver, field)
+        for _ in range(12):
+            if driver.find_elements(By.CSS_SELECTOR, ".q-menu .q-item"):
+                opened = True
+                break
+            time.sleep(0.2)
+        if opened:
+            break
+    opt = _find_option(driver, value) if opened else None
+    if opt is None:
+        try:
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError("option {!r} not found in dropdown {!r}".format(value, label))
+    _safe_click(driver, opt)
+    time.sleep(0.4)
+    # Close any lingering menu so it can't bleed into SEARCH.
+    if any(_disp_safe(m) for m in driver.find_elements(By.CSS_SELECTOR, ".q-menu")):
+        try:
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        except Exception:  # noqa: BLE001
+            pass
+    # Verify it stuck.
+    if value.upper() not in _dropdown_value(driver, field).upper():
+        raise RuntimeError(
+            "dropdown {!r}: picked {!r} but field still shows {!r}".format(
+                label, value, _dropdown_value(driver, field)[:40]))
+    return True
 
 
 def _set_checkbox(driver, label, want):

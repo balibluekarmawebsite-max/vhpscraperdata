@@ -17,6 +17,8 @@ chromedriver
 credentials.py
 import_token.txt
 .import_token
+cancellation_token.txt
+*_token.txt
 
 # Python
 __pycache__/

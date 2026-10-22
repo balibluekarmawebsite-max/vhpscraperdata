@@ -175,10 +175,9 @@ REPORTS = [
         # window is yesterday-only (period), both gated by period_required so a
         # wrong-window CSV is skipped rather than posted.
         #
-        # NOTE: reservation-status currently uses VHP's default ("Guaranteed"). If
-        # the daily report should include EVERY cancellation regardless of guarantee
-        # type, the status dropdown needs to be set to "All" (ask Claude to add it) —
-        # the endpoint is idempotent, so a day can be re-pulled afterwards.
+        # To include EVERY cancellation regardless of guarantee type, change
+        # "Reservation Status" in `dropdowns` below from "Guaranteed" to "All" (the
+        # endpoint is idempotent, so a day can be re-pulled afterwards).
         "name": "cancelled-reservation-guest",
         "cadence": "daily",
         "url": "https://e1-vhp.com/fr/report/cancelled-reservation-guest",
@@ -188,10 +187,27 @@ REPORTS = [
         "upload": {
             "url": "https://dashboard.bluekarmasecrets.com/api/daily/cancellation",
             "require_ok": False,   # idempotent endpoint; accept any 2xx
+            # AUTH: by default this sends the SAME bearer token as /api/import
+            # (import_token.txt / IMPORT_API_TOKEN). If this endpoint uses a
+            # DIFFERENT token (a 401 "invalid token" means it does), put that token
+            # in a git-ignored file and name it here — e.g.
+            #   "token_file": "cancellation_token.txt",
+            # or point at an env var with  "token_env": "CANCELLATION_API_TOKEN".
         },
         # Filter the date range by CANCEL DATE (not Check-in Date) — selected
         # before the range is set. (The radio's aria-label on the page.)
         "select_radio": "Cancel Date",
+        # Pin the left-panel filters to match the agreed report (so the daily scrape
+        # is deterministic and can't drift if someone changes a filter in that
+        # window). Best-effort: if a control can't be set, it logs it and carries on
+        # (these values are also VHP's defaults). Change "Guaranteed" -> "All" above
+        # to include non-guaranteed cancellations.
+        "dropdowns": {
+            "Reservation Status": "Guaranteed",
+            "Guest Profile Type": "All",
+            "Room Type": "All",
+        },
+        "checkboxes": {"Include Reactive Reservation": False},
         # Daily window: YESTERDAY only, by cancel date. The 6am run pulls the
         # previous (complete) day's cancellations — e.g. run on 19 Oct -> cancel
         # date 18/10..18/10. (days_back=1, include_today=False -> today-1..today-1.)
