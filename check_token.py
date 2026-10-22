@@ -26,9 +26,17 @@ def _mask(t):
 
 def main():
     env = os.environ.get("IMPORT_API_TOKEN", "")
-    print("Resolved token the scraper will send:")
-    print("   value : {}".format(_mask(config.IMPORT_API_TOKEN)))
-    print("   source: {}".format("env IMPORT_API_TOKEN" if env else "token file"))
+    file_tok = config._read_secret_file("import_token.txt", ".import_token")
+
+    print("Token sources found:")
+    print("   env IMPORT_API_TOKEN : {}".format(_mask(env) if env else "(not set)"))
+    print("   import_token.txt     : {}".format(_mask(file_tok) if file_tok else "(not set)"))
+    print()
+    print("==> The scraper will SEND: {}".format(_mask(config.IMPORT_API_TOKEN)))
+    print("    (the file wins; the env var is only a fallback if the file is missing)")
+    if env and file_tok and env != file_tok:
+        print("    NOTE: the env var and the file DIFFER — the file is used. Clear the")
+        print("          stale env var with:  setx IMPORT_API_TOKEN \"\"  (then open a new cmd)")
     print()
 
     for name in ("import_token.txt", ".import_token"):

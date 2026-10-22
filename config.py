@@ -81,13 +81,16 @@ def _read_secret_file(*names):
     return ""
 
 
-# The dashboard API token. Order of precedence:
-#   1. IMPORT_API_TOKEN environment variable (works for interactive runs)
-#   2. import_token.txt / .import_token in C:\vhp-scraper (works for EVERY run,
-#      including scheduled tasks — put the token on one line, no quotes).
+# The dashboard API token. The FILE is the source of truth (precedence 1) so that
+# updating import_token.txt always takes effect — otherwise a stale IMPORT_API_TOKEN
+# environment variable left over from an old `setx` would silently override your
+# updated file and cause HTTP 401 on interactive runs (the scheduled task doesn't
+# inherit that env var, so the two would disagree). Order of precedence:
+#   1. import_token.txt / .import_token in C:\vhp-scraper (one line, no quotes)
+#   2. IMPORT_API_TOKEN environment variable (fallback if the file is missing)
 # The file is git-ignored, so the secret is never committed.
-IMPORT_API_TOKEN = (os.environ.get("IMPORT_API_TOKEN", "")
-                    or _read_secret_file("import_token.txt", ".import_token"))
+IMPORT_API_TOKEN = (_read_secret_file("import_token.txt", ".import_token")
+                    or os.environ.get("IMPORT_API_TOKEN", ""))
 
 # ---------------------------------------------------------------------------
 # PROPERTIES
