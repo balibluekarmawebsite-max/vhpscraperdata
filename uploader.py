@@ -78,16 +78,15 @@ def upload(path, property_code, report, cfg=None, today=None):
 
     # A report may define its OWN endpoint via report['upload'] — e.g. the
     # cancellation report posts the raw CSV to /api/daily/cancellation with just
-    # `property` + the file (the dashboard parses + de-dups it). A custom endpoint
-    # may also name its OWN auth token (token / token_env / token_file); otherwise
-    # we use the shared /api/import contract (property/section/week_ending/source)
-    # and the shared token.
+    # `property` + the file. A custom endpoint may also name its OWN auth token
+    # (token / token_env / token_file); otherwise we use the shared /api/import
+    # contract (property/section/week_ending/source) and the shared token.
     custom = report.get("upload")
     if custom:
         url = custom.get("url") or cfg["url"]
         token = _resolve_token(custom, cfg)
         data = {"property": property_code.upper()}
-        data.update(custom.get("extra_fields", {}) or {})
+        data.update(_sub_today(custom.get("extra_fields"), today))
         require_ok = bool(custom.get("require_ok", False))
     else:
         section = report.get("section")
@@ -105,13 +104,42 @@ def upload(path, property_code, report, cfg=None, today=None):
         }
         require_ok = True
 
+    result = _post_file(path, url, token, data, require_ok, cfg)
+
+    # Additional POSTs of the SAME file to extra endpoints — e.g. the daily pickup
+    # feed: the Yearly-Forecast CSV is also POSTed to /api/daily/pickup with
+    # `property` + `snapshotDate=<today>`. One pull, N posts, per property per run.
+    # An extra that fails (after retries) raises, so a broken feed is never silent.
+    for extra in (report.get("extra_uploads") or []):
+        e_url = extra.get("url")
+        if not e_url:
+            continue
+        e_token = _resolve_token(extra, cfg)
+        e_data = {"property": property_code.upper()}
+        e_data.update(_sub_today(extra.get("extra_fields"), today))
+        _post_file(path, e_url, e_token, e_data, bool(extra.get("require_ok", False)), cfg)
+
+    return result
+
+
+def _sub_today(fields, today=None):
+    """Copy `fields`, replacing the literal value "{today}" with today's ISO date
+    (YYYY-MM-DD). Lets a report declare e.g. {"snapshotDate": "{today}"} and get the
+    run date filled in at upload time."""
+    iso = (today or datetime.date.today()).isoformat()
+    return {k: (iso if v == "{today}" else v) for k, v in (fields or {}).items()}
+
+
+def _post_file(path, url, token, data, require_ok, cfg):
+    """POST one CSV to one endpoint, with retries. Returns the result dict on
+    success or raises UploadError. Shared by the primary upload and every
+    extra_uploads target, so each endpoint gets the same backoff + 2xx handling."""
     if not token:
         raise UploadError(
             "no dashboard token for {} — put it in import_token.txt in C:\\vhp-scraper "
             "(or set the report's upload.token_file / token_env)".format(url))
 
     headers = {"Authorization": "Bearer {}".format(token)}
-
     backoffs = cfg.get("retry_backoffs", [2, 4, 8, 16])
     attempt = 0
     timings = []  # per-attempt "status in Ns" — shows fast-crash vs slow-timeout
@@ -121,8 +149,8 @@ def upload(path, property_code, report, cfg=None, today=None):
         if attempt <= len(backoffs):
             time.sleep(backoffs[attempt - 1])
             return True
-        raise UploadError("{} after {} attempt(s) [{}]".format(
-            msg, attempt, ", ".join(timings)), status=status)
+        raise UploadError("{} -> {} after {} attempt(s) [{}]".format(
+            msg, url, attempt, ", ".join(timings)), status=status)
 
     while True:
         attempt += 1
@@ -159,8 +187,8 @@ def upload(path, property_code, report, cfg=None, today=None):
             snippet = (resp.text or "")[:140].replace("\n", " ").replace("\r", " ")
             looks_html = "html" in ctype.lower() or (resp.text or "").lstrip()[:1] == "<"
             if not require_ok and not looks_html:
-                # Custom endpoint (e.g. /api/daily/cancellation): accept any real
-                # 2xx — it's idempotent and may not return the {"ok":true} shape.
+                # Custom endpoint (e.g. /api/daily/*): accept any real 2xx — it's
+                # idempotent and may not return the {"ok":true} shape.
                 result = body if isinstance(body, dict) else {}
                 result["ok"] = True
                 result["_status"] = status
@@ -184,7 +212,8 @@ def upload(path, property_code, report, cfg=None, today=None):
                                status=status):
                 continue
         raise UploadError(
-            "HTTP {} from dashboard: {} [{}]".format(status, detail, ", ".join(timings)),
+            "HTTP {} from dashboard ({}): {} [{}]".format(
+                status, url, detail, ", ".join(timings)),
             status=status)
 
 

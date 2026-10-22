@@ -148,6 +148,19 @@ REPORTS = [
         "checkboxes": {"Show Revenue": True},
         # Exact VHP option labels to turn OFF in the Segment Code list.
         "segment_untick": ["COMPLIMENT", "HOUSE USE"],
+        # Daily PICKUP feed: besides the normal /api/import (section B) post above,
+        # ALSO post this SAME forecast CSV, as-is, to /api/daily/pickup with
+        # `property` + `snapshotDate=<today>` (the run date). One pull, one extra
+        # POST, per property, once a day. Uses the same bearer token as /api/import
+        # by default; if /api/daily/pickup uses a DIFFERENT token, add
+        # "token_file": "pickup_token.txt" (git-ignored) inside this block.
+        "extra_uploads": [
+            {
+                "url": "https://dashboard.bluekarmasecrets.com/api/daily/pickup",
+                "extra_fields": {"snapshotDate": "{today}"},
+                "require_ok": False,   # idempotent daily snapshot; accept any 2xx
+            },
+        ],
     },
     {
         "name": "reservation-by-creation-date",
