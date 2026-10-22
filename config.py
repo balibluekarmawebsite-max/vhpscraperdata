@@ -166,22 +166,21 @@ REPORTS = [
         "period_required": True,
     },
     {
-        # NEW — cancellation report (cancelled-reservation-guest). DRAFT.
+        # Cancellation report (cancelled-reservation-guest) — daily.
         # Date control = the SAME V-Calendar range picker as the reservation
-        # report (data-cy="field-date", "From - Until"), so the daily window uses
-        # the existing calendar logic. It posts the RAW CSV to a dedicated
-        # endpoint (property + file); the dashboard parses + de-dups it (idempotent
-        # -> re-posting a day is safe), so we never filter rows here.
+        # report (data-cy="field-date", "From - Until"). It posts the RAW CSV to a
+        # dedicated endpoint (property + file); the dashboard parses + de-dups it
+        # (idempotent -> re-posting a day is safe), so we never filter rows here.
+        # The date-type radio is forced to "Cancel Date" (select_radio) and the
+        # window is yesterday-only (period), both gated by period_required so a
+        # wrong-window CSV is skipped rather than posted.
         #
-        # cadence "manual" keeps it OUT of the scheduled runs until the remaining
-        # filter choices are confirmed; then set `period` + `period_required` and
-        # change `cadence` to "daily". Remaining TODOs:
-        #   * date-type radio (btn-option-group): "Check-in Date" (default) vs a
-        #     "Cancellation Date" option — decides what the window selects.
-        #   * reservation-status dropdown: currently "Guaranteed" -> likely "All".
-        #   * the daily window (e.g. last 7 days by cancel date; dashboard de-dups).
+        # NOTE: reservation-status currently uses VHP's default ("Guaranteed"). If
+        # the daily report should include EVERY cancellation regardless of guarantee
+        # type, the status dropdown needs to be set to "All" (ask Claude to add it) —
+        # the endpoint is idempotent, so a day can be re-pulled afterwards.
         "name": "cancelled-reservation-guest",
-        "cadence": "manual",   # TODO -> "daily" once the filters below are confirmed
+        "cadence": "daily",
         "url": "https://e1-vhp.com/fr/report/cancelled-reservation-guest",
         "section": "D",        # for logging only — this report uses its own endpoint
         "source": "vhp:cancelled-reservation-guest",
