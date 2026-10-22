@@ -33,7 +33,9 @@ from logging.handlers import RotatingFileHandler
 import config
 from browser import kill_stale_chromedrivers, make_driver_attached
 from runlock import RunLock
-from vhp import (LoginRequired, click_search, open_report, wait_for_report_data)
+from vhp import (LoginRequired, _captcha_reset, _read_login_state,
+                 attempt_auto_login, click_search, dismiss_session_expired,
+                 open_report, wait_for_report_data)
 
 
 def setup_logging():
@@ -72,15 +74,46 @@ def touch_property(logger, prop, report, do_search):
         return "error"
 
     try:
-        # Navigating to a real report page is an authenticated load: if it renders
-        # (SEARCH button appears) we're logged in; if a login field appears,
-        # open_report raises LoginRequired. No driver.quit() (keep the window open).
+        # Look at the window AS-IS first, WITHOUT navigating. If VHP is already
+        # logged out, reloading would only fetch a fresh /login page -> a NEW
+        # CAPTCHA, wiping any the human is part-way through typing. So when we can
+        # already see a logout we do NOT navigate: we click OK on the 'session
+        # expired' dialog (which doesn't reload the page) and then TRY AUTO-LOGIN
+        # (opt-in, guarded). If auto-login can't do it, we report 'logged_out' and
+        # leave the window ready on the login page for a human. We only navigate
+        # (nudge to keep warm) once we're actually logged in.
+        state = _read_login_state(driver)
+        if state in ("expired", "login"):
+            if state == "expired":
+                dismiss_session_expired(driver)  # click OK -> ready on the login page
+            if attempt_auto_login(driver, prop, logger):
+                logger.info("[%s] auto-login succeeded — session restored", prop["code"])
+                # fall through to the keep-warm nudge below
+            else:
+                logger.warning("[%s] VHP is logged out — type the CAPTCHA + LOG IN in "
+                               "its window (the bot left it ready on the login page)",
+                               prop["code"])
+                return "logged_out"
+
+        # Logged in (or just auto-logged-in). Navigate to keep the session warm. If
+        # navigating reveals a fresh logout, try auto-login once more, else hand off.
         try:
             open_report(driver, report)
         except LoginRequired:
-            logger.warning("[%s] VHP is LOGGED OUT — open its window and log in "
-                           "again (scrapes will fail until then)", prop["code"])
-            return "logged_out"
+            if attempt_auto_login(driver, prop, logger):
+                logger.info("[%s] auto-login succeeded after the nudge", prop["code"])
+                try:
+                    open_report(driver, report)
+                except LoginRequired:
+                    logger.warning("[%s] VHP logged out again — type the CAPTCHA + "
+                                   "LOG IN in its window", prop["code"])
+                    return "logged_out"
+            else:
+                logger.warning("[%s] VHP just logged out — type the CAPTCHA + LOG IN "
+                               "in its window", prop["code"])
+                return "logged_out"
+
+        _captcha_reset(prop)  # confirmed logged-in -> re-arm auto-login for next time
 
         if do_search:
             try:

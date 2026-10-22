@@ -304,3 +304,40 @@ def get_credentials(code):
     if user and pwd:
         return user, pwd
     return None
+
+
+# ---------------------------------------------------------------------------
+# AUTO-CAPTCHA LOGIN (opt-in; the user accepted the account lock-out risk)
+# ---------------------------------------------------------------------------
+# After a VHP timeout the bot can OCR the numeric login CAPTCHA and sign in by
+# itself, instead of only alerting a human. This is deliberately HIGH-PRECISION /
+# LOW-RECALL and heavily safeguarded, because repeated FAILED logins are exactly
+# what would lock the VHP account:
+#   * it only submits when several image preprocessings AGREE on the digits;
+#   * it makes ONE submit per detected logout and waits AUTO_CAPTCHA_COOLDOWN_SEC
+#     between real submits (per property);
+#   * it SHUTS ITSELF OFF after AUTO_CAPTCHA_MAX_FAILURES failed logins in a row
+#     and stays off until a human logs in successfully (which re-arms it);
+#   * it never touches the login form while a human is typing (CAPTCHA box
+#     non-empty), and never runs if pytesseract/Tesseract aren't installed.
+# Turn it OFF instantly WITHOUT editing code: create the file logs/.no_auto_captcha
+# (see AUTO_CAPTCHA_KILL_FILE), or set the env var VHP_NO_AUTO_CAPTCHA=1.
+AUTO_CAPTCHA_ENABLED = True
+AUTO_CAPTCHA_COOLDOWN_SEC = 300     # min seconds between two real submits
+AUTO_CAPTCHA_MAX_FAILURES = 2       # consecutive failed logins -> auto-off
+CAPTCHA_MIN_LEN = 4                 # plausible CAPTCHA length range (digits)
+CAPTCHA_MAX_LEN = 8
+AUTO_CAPTCHA_KILL_FILE = os.path.join(LOGS_DIR, ".no_auto_captcha")
+
+
+def auto_captcha_enabled():
+    """Master switch for auto-CAPTCHA login, checked at RUNTIME so the kill-file /
+    env var take effect immediately (no restart needed)."""
+    if os.environ.get("VHP_NO_AUTO_CAPTCHA"):
+        return False
+    try:
+        if os.path.exists(AUTO_CAPTCHA_KILL_FILE):
+            return False
+    except OSError:
+        pass
+    return bool(AUTO_CAPTCHA_ENABLED)
