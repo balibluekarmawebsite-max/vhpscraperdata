@@ -258,23 +258,6 @@ def _login_form(driver):
     return user, pwd, submit
 
 
-def _has_captcha(driver):
-    """True if the login screen is showing a CAPTCHA (which blocks auto-login)."""
-    if driver.find_elements(
-        By.XPATH,
-        "//input[contains(translate(@placeholder,"
-        "'abcdefghijklmnopqrstuvwxyz','ABCDEFGHIJKLMNOPQRSTUVWXYZ'),'CAPTCHA')]",
-    ):
-        return True
-    for el in driver.find_elements(By.XPATH, "//*[contains({}, 'CAPTCHA')]".format(_ci("."))):
-        try:
-            if el.is_displayed():
-                return True
-        except Exception:  # noqa: BLE001
-            continue
-    return False
-
-
 def _is_crash_page(driver):
     """True if the tab is showing Chrome's OWN crash/error page — e.g. the
     'Aw, Snap! Out of Memory' page — rather than the VHP app. A long-lived VHP
@@ -361,33 +344,81 @@ def _captcha_input(driver):
     ])
 
 
+def _on_login_url(driver):
+    """True if the window's URL is VHP's /login route. Used so we never NAVIGATE a
+    window that's really on the login page even when the form hasn't painted yet
+    (an 'unknown' read) — reloading it would wipe a CAPTCHA a human may be typing."""
+    try:
+        return "/login" in (driver.current_url or "").lower()
+    except WebDriverException:
+        return False
+
+
+def _clear_fields(els):
+    """Best-effort clear of inputs the bot itself typed into (so a failed auto-login
+    doesn't leave stale digits/creds for a human to submit by reflex). Never raises;
+    the page may have navigated out from under the elements."""
+    for el in els or []:
+        try:
+            el.clear()
+        except Exception:  # noqa: BLE001 - stale / navigated away
+            pass
+
+
 # --- auto-CAPTCHA circuit breaker: per-property state in logs/.captcha_<code>.json
 # This is the safety net that makes auto-login un-hammerable: one submit per
 # detected logout, a cooldown between submits, and auto-OFF after N failures until
 # a human logs in (which re-arms it). Failed logins are what lock the account, so
-# the breaker caps them hard.
+# the breaker caps them hard, and every operation fails SAFE (a state file that
+# can't be read or written blocks auto-login rather than silently re-enabling it).
+_CAP_FRESH = {"last_attempt": 0, "failures": 0, "disabled": False}
+_CAP_UNREADABLE = "unreadable"  # file EXISTS but is corrupt/partial -> treat as blocked
+
+
 def _cap_state_path(prop):
     return os.path.join(config.LOGS_DIR, ".captcha_{}.json".format(prop["code"]))
 
 
 def _cap_state_read(prop):
+    """Return the breaker state dict, or _CAP_UNREADABLE if the file EXISTS but can't
+    be parsed. A MISSING file is a genuine first run -> fresh. This distinction is
+    what makes the breaker fail SAFE: corruption blocks, it never re-enables."""
+    path = _cap_state_path(prop)
     try:
-        with open(_cap_state_path(prop)) as fh:
+        if not os.path.exists(path):
+            return dict(_CAP_FRESH)
+    except OSError:
+        return _CAP_UNREADABLE
+    try:
+        with open(path) as fh:
             st = json.load(fh)
-        if isinstance(st, dict):
-            return st
-    except Exception:  # noqa: BLE001 - missing/corrupt -> fresh state
-        pass
-    return {"last_attempt": 0, "failures": 0, "disabled": False}
+        return st if isinstance(st, dict) else _CAP_UNREADABLE
+    except Exception:  # noqa: BLE001 - exists but corrupt/partial/locked
+        return _CAP_UNREADABLE
 
 
 def _cap_state_write(prop, st):
+    """Write the breaker state ATOMICALLY (temp file + fsync + os.replace), so a
+    crash / full disk can never leave a 0-byte or partial file. Returns True only if
+    the write durably landed — a False tells the caller NOT to proceed with a login
+    (an un-recordable attempt would be an un-counted, i.e. unbounded, one)."""
+    path = _cap_state_path(prop)
+    tmp = path + ".tmp"
     try:
         os.makedirs(config.LOGS_DIR, exist_ok=True)
-        with open(_cap_state_path(prop), "w") as fh:
+        with open(tmp, "w") as fh:
             json.dump(st, fh)
-    except Exception:  # noqa: BLE001 - never let state I/O break a run
-        pass
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        return True
+    except Exception:  # noqa: BLE001 - disk full / locked / permission
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
 
 
 def _captcha_blocked(prop):
@@ -395,6 +426,9 @@ def _captcha_blocked(prop):
     if not config.auto_captcha_enabled():
         return "auto-captcha is off (config flag / kill-file / env var)"
     st = _cap_state_read(prop)
+    if st == _CAP_UNREADABLE:
+        return ("breaker state file unreadable/corrupt — refusing to auto-login "
+                "until a human logs in (which rewrites it) or the file is removed")
     if st.get("disabled"):
         return ("auto-captcha OFF after {} failed login(s) in a row — a human must "
                 "log in once to re-arm it".format(st.get("failures", 0)))
@@ -405,42 +439,51 @@ def _captcha_blocked(prop):
     return None
 
 
-def _captcha_record_attempt(prop):
-    st = _cap_state_read(prop)
-    st["last_attempt"] = int(time.time())
-    _cap_state_write(prop, st)
-
-
 def _captcha_record_failure(prop):
+    """Count ONE login attempt as a FAILURE (pessimistic) and set the cooldown; trip
+    the breaker at AUTO_CAPTCHA_MAX_FAILURES. Returns (state, persisted). persisted
+    is False if the write didn't durably land — the caller must then NOT submit, so
+    an un-recordable attempt is never actually made."""
     st = _cap_state_read(prop)
+    if st == _CAP_UNREADABLE or not isinstance(st, dict):
+        st = dict(_CAP_FRESH)
     st["failures"] = int(st.get("failures", 0)) + 1
     st["last_attempt"] = int(time.time())
     if st["failures"] >= config.AUTO_CAPTCHA_MAX_FAILURES:
         st["disabled"] = True
-    _cap_state_write(prop, st)
-    return st
+    persisted = _cap_state_write(prop, st)
+    return st, persisted
 
 
 def _captcha_reset(prop):
-    """Re-arm auto-login after we OBSERVE a logged-in window (clears the failure
-    count and the auto-off flag). Only writes when there's something to clear."""
+    """Re-arm auto-login after we OBSERVE a logged-in window: clear the failure
+    count, the cooldown and the auto-off flag (and overwrite a corrupt file). Only
+    writes when there's something to clear or fix."""
     st = _cap_state_read(prop)
-    if st.get("failures") or st.get("disabled") or st.get("last_attempt"):
-        _cap_state_write(prop, {"last_attempt": 0, "failures": 0, "disabled": False})
+    if (st == _CAP_UNREADABLE or st.get("failures") or st.get("disabled")
+            or st.get("last_attempt")):
+        _cap_state_write(prop, dict(_CAP_FRESH))
 
 
-def attempt_auto_login(driver, prop, logger=None):
-    """Best-effort: when the window is on the VHP login page, OCR the CAPTCHA and
-    log in. Returns True ONLY if we end up logged in. Never raises.
+def attempt_auto_login(driver, prop, recovery, logger=None):
+    """Best-effort: when the BOT'S OWN recovery brought the window to VHP's login
+    page, OCR the CAPTCHA and log in. Returns True ONLY if a positive logged-in page
+    is confirmed. Never raises.
 
-    Heavily guarded so it can never hammer the login (which would lock the account):
-      * master switch + kill-file/env (config.auto_captcha_enabled);
-      * per-property cooldown + circuit-breaker (auto-OFF after N fails until a
-        human logs in);
-      * exactly ONE submit per call — no internal retry loop;
-      * backs off if a human is already typing (CAPTCHA box non-empty);
-      * needs pytesseract + Tesseract installed, else returns False (-> human);
-      * only submits a CAPTCHA the OCR read CONFIDENTLY (see captcha.solve_captcha).
+    `recovery` must be True — it means the bot itself reached this login page THIS
+    tick (it dismissed the expired dialog, or its own navigation bounced to /login).
+    We refuse to auto-submit on a login page we merely FOUND already open, because
+    that's exactly where a human doing a manual login would be.
+
+    Un-hammerable by design:
+      * master switch + kill-file/env; per-property cooldown + circuit-breaker
+        (auto-OFF after N fails until a human logs in); exactly ONE submit per call;
+      * backs off if a human is typing (CAPTCHA box non-empty) — re-checked AFTER the
+        OCR, right before submitting, to close the typing-during-OCR race;
+      * the attempt is counted BEFORE the submit and only cleared on a CONFIRMED
+        positive login, so a crash/transient can neither drop nor fake it, and a
+        state file that can't be persisted aborts the submit entirely;
+      * only submits a CAPTCHA the OCR read CONFIDENTLY; needs Tesseract installed.
     """
     import captcha  # local import: OCR deps are optional, keep them off the hot path
 
@@ -448,6 +491,8 @@ def attempt_auto_login(driver, prop, logger=None):
         if logger is not None:
             logger.info("[%s] auto-login: %s", prop["code"], msg)
 
+    if not recovery:
+        return False  # never auto-submit on a login page we didn't just create
     reason = _captcha_blocked(prop)
     if reason:
         _log(reason)
@@ -457,39 +502,48 @@ def attempt_auto_login(driver, prop, logger=None):
              "Tesseract engine to enable it".format(captcha.ocr_unavailable_reason()))
         return False
 
-    # Wait briefly for the login form + CAPTCHA box to be present (after an OK click
-    # the redirect to /login takes a moment).
-    form = None
+    # Wait briefly for the login form + CAPTCHA box (after an OK click the redirect
+    # to /login takes a moment).
+    form = cap_in = None
     end = time.time() + 8
     while time.time() < end:
-        form = _login_form(driver)
-        if form is not None and _captcha_input(driver) is not None:
+        try:
+            form = _login_form(driver)
+            cap_in = _captcha_input(driver)
+        except WebDriverException:
+            return False
+        if form is not None and cap_in is not None:
             break
         time.sleep(0.4)
-    cap_in = _captcha_input(driver)
     if form is None or cap_in is None:
         _log("login form / CAPTCHA box not found — nothing to do")
         return False
 
-    # Never fight a human who's already typing the CAPTCHA.
-    try:
-        if (cap_in.get_attribute("value") or "").strip():
-            _log("CAPTCHA box already has text — a human is logging in; backing off")
+    def _box_has_text():
+        try:
+            return bool((cap_in.get_attribute("value") or "").strip())
+        except Exception:  # noqa: BLE001
             return False
-    except Exception:  # noqa: BLE001
-        pass
 
-    # Fill username/password only if the fields are empty (the browser usually
-    # remembers them); fall back to stored credentials.py creds.
+    # Never fight a human already typing the CAPTCHA.
+    if _box_has_text():
+        _log("CAPTCHA box already has text — a human is logging in; backing off")
+        return False
+
+    # Fill username/password only if empty (the browser usually remembers them);
+    # track what WE filled so we can clear it again on failure.
     user_el, pwd_el, submit_el = form
     creds = config.get_credentials(prop["code"])
+    filled = []
     try:
         if user_el is not None and not (user_el.get_attribute("value") or "").strip() and creds:
             user_el.clear()
             user_el.send_keys(creds[0])
+            filled.append(user_el)
         if pwd_el is not None and not (pwd_el.get_attribute("value") or "").strip() and creds:
             pwd_el.clear()
             pwd_el.send_keys(creds[1])
+            filled.append(pwd_el)
     except Exception:  # noqa: BLE001 - keep going; we re-check below
         pass
     try:
@@ -500,41 +554,61 @@ def attempt_auto_login(driver, prop, logger=None):
     if not have_user or not have_pwd:
         _log("no username/password available (browser didn't remember them and no "
              "credentials.py) — handing to a human")
+        _clear_fields(filled)
         return False
 
     digits = captcha.solve_captcha(driver, config.CAPTCHA_MIN_LEN, config.CAPTCHA_MAX_LEN)
     if not digits:
         _log("CAPTCHA not read confidently — handing to a human (NO attempt made)")
+        _clear_fields(filled)
         return False
 
-    # From here on it's a REAL submit — record it for the cooldown/breaker.
-    _captcha_record_attempt(prop)
+    # TOCTOU guard: a human may have started typing DURING the (multi-second) OCR.
+    # Re-check right before we touch the box, and abort BEFORE counting an attempt.
+    if _box_has_text():
+        _log("a human started typing the CAPTCHA during OCR — backing off (no submit)")
+        _clear_fields(filled)
+        return False
+
+    # Count the attempt as a FAILURE up front (sets cooldown + advances the breaker).
+    # Any exit after this — success, timeout, or a renderer crash — leaves the
+    # breaker correctly advanced; we only CLEAR it on a confirmed positive login. If
+    # the state can't be persisted, DON'T submit (an un-counted attempt is unbounded).
+    st, persisted = _captcha_record_failure(prop)
+    if not persisted:
+        _log("could not save breaker state (disk full / logs locked?) — NOT "
+             "submitting, to stay un-hammerable")
+        _clear_fields(filled)
+        return False
+
     try:
         cap_in.clear()
         cap_in.send_keys(digits)
-    except Exception as exc:  # noqa: BLE001
-        _log("could not type the CAPTCHA: {}".format(_describe(exc)))
-        return False
-    if submit_el is not None:
-        _safe_click(driver, submit_el)
-    else:
-        try:
+        if submit_el is not None:
+            _safe_click(driver, submit_el)
+        else:
             cap_in.send_keys(Keys.RETURN)
-        except Exception:  # noqa: BLE001
-            pass
+    except Exception as exc:  # noqa: BLE001 - submit machinery failed; failure stands
+        _log("could not submit the login: {}".format(_describe(exc)))
+        return False
 
-    # Wait for the result: login form gone AND not expired = logged in.
-    end = time.time() + 20
+    # Success requires a POSITIVE, stable logged-in signal (the report SEARCH
+    # button) — NOT merely 'the login form vanished', which flickers during a
+    # re-render after a wrong submit and would wrongly reset the breaker.
+    end = time.time() + 25
     while time.time() < end:
-        if _session_expired(driver):
-            break
-        if _login_form(driver) is None:
-            _log("logged in OK (CAPTCHA '{}' accepted)".format(digits))
-            _captcha_reset(prop)
-            return True
+        try:
+            if _read_login_state(driver, settle=1.0) == "in":
+                _captcha_reset(prop)  # confirmed in -> clear the recorded failure
+                _log("logged in OK (CAPTCHA '{}' accepted)".format(digits))
+                return True
+        except WebDriverException:
+            break  # renderer died; the failure we recorded up front stands
         time.sleep(0.5)
 
-    st = _captcha_record_failure(prop)
+    # Not confirmed logged in -> the up-front failure stands. Clear our wrong entry
+    # (and any creds we filled) so a later human doesn't submit stale values.
+    _clear_fields(filled + [cap_in])
     if st.get("disabled"):
         _log("login FAILED (CAPTCHA '{}') — {} fails in a row, auto-login now OFF "
              "until a human logs in".format(digits, st.get("failures")))
@@ -545,54 +619,84 @@ def attempt_auto_login(driver, prop, logger=None):
     return False
 
 
+def _logged_out_msg(prop, closed):
+    """Guidance text that matches what's actually on screen (P5): if the expired
+    dialog was closed, the window is on the login page; if not, OK must be clicked
+    first."""
+    code = prop["code"]
+    if closed:
+        return ("{code}: VHP is logged out — the window is on the login page; type "
+                "the CAPTCHA and click LOG IN in the '{code}' Chrome window, then "
+                "re-run.".format(code=code))
+    return ("{code}: VHP session expired — click OK in the '{code}' Chrome window, "
+            "then type the CAPTCHA and LOG IN, then re-run.".format(code=code))
+
+
+def _finish_login_state(driver, prop, state, login_is_recovery):
+    """Handle a non-'in' login state: dismiss any expired dialog, and (only when the
+    bot itself caused this login page this tick) try auto-login. Returns True if we
+    end up logged in, else raises LoginRequired. `login_is_recovery` says whether a
+    plain 'login' state was caused by the bot (True) or merely found already open
+    (False -> never auto-submit; hand to a human)."""
+    if state == "expired":
+        closed = dismiss_session_expired(driver)  # click OK -> lands on login page
+        if closed and attempt_auto_login(driver, prop, recovery=True):
+            return True
+        raise LoginRequired(_logged_out_msg(prop, closed))
+    if state == "login":
+        if login_is_recovery and attempt_auto_login(driver, prop, recovery=True):
+            return True
+        raise LoginRequired(_logged_out_msg(prop, True))
+    raise LoginRequired(
+        "{code}: could not confirm login (the report didn't render). Check the "
+        "'{code}' Chrome window.".format(code=prop["code"]))
+
+
 def ensure_logged_in(driver, prop, creds, probe_url):
     """Ensure the attached window is logged in, WITHOUT disturbing a login a human
     may be typing.
 
-    Critically, we LOOK at the window as-is first and only navigate when it is NOT
-    already showing a login page — otherwise a scheduled scrape firing while someone
-    hand-types the CAPTCHA would reload /login and wipe it (the user's #1 concern).
+    We LOOK at the window as-is first and only navigate when it is NOT already on a
+    login page — otherwise a scheduled scrape firing while someone hand-types the
+    CAPTCHA would reload /login and wipe it (the user's #1 concern).
 
-      * already logged in            -> return (open_report navigates to the report)
-      * on the login / expired page  -> try auto-login (opt-in, guarded); if that
-                                        can't do it, raise LoginRequired and leave
-                                        the window ready on the login page
-      * some other / blank page       -> navigate to probe_url, then re-evaluate
-    (`creds` is accepted for backward-compatibility but credentials now come from
+      * already logged in             -> return (open_report navigates to the report)
+      * expired dialog up             -> click OK + (opt-in) auto-login; else raise
+      * on /login already (bot didn't create it) -> hand to a human (never auto-
+                                        submit where a human might be mid-login)
+      * blank / other page            -> navigate to probe_url, then re-evaluate; a
+                                        login page the BOT's navigation reveals is
+                                        bot-initiated, so auto-login applies there
+    (`creds` is accepted for backward-compatibility; credentials now come from
     config.get_credentials inside attempt_auto_login.)
     """
-    def _handle_logged_out(state):
-        if state == "expired":
-            dismiss_session_expired(driver)  # click OK -> lands on the login page
-        if attempt_auto_login(driver, prop):
-            return True
-        raise LoginRequired(
-            "{code}: VHP is logged out — the window is on the login page; type the "
-            "CAPTCHA and click LOG IN in the '{code}' Chrome window, then re-run."
-            .format(code=prop["code"]))
-
     state = _read_login_state(driver)
     if state == "in":
         _captcha_reset(prop)  # observed logged-in -> re-arm auto-login for next time
         return
     if state in ("expired", "login"):
-        if _handle_logged_out(state):
+        # A login page we FOUND already open is not a recovery we initiated.
+        if _finish_login_state(driver, prop, state, login_is_recovery=False):
             _captcha_reset(prop)
             return
 
-    # state == 'unknown' (blank / other page) — safe to navigate (not a login page).
-    _safe_get(driver, probe_url)  # also recovers a crashed ('Aw, Snap!') tab
+    # state == 'unknown'. If we're actually on /login (form just not painted yet),
+    # treat it as a login page: do NOT navigate (that could wipe a human's entry).
+    if _on_login_url(driver):
+        raise LoginRequired(_logged_out_msg(prop, True))
+
+    _safe_get(driver, probe_url)  # not a login page -> safe; also recovers a crash
     time.sleep(3)  # let the SPA render (app or login form)
 
     state = _read_login_state(driver)
     if state == "in":
         _captcha_reset(prop)
         return
-    if state in ("expired", "login"):
-        if _handle_logged_out(state):
-            _captcha_reset(prop)
-            return
-
+    # A login/expired page our OWN navigation just revealed IS a bot-initiated
+    # recovery, so auto-login is allowed here.
+    if _finish_login_state(driver, prop, state, login_is_recovery=True):
+        _captcha_reset(prop)
+        return
     raise LoginRequired(
         "{code}: could not confirm login (the report didn't render). Check the "
         "'{code}' Chrome window.".format(code=prop["code"]))
@@ -612,7 +716,7 @@ def open_report(driver, report):
     # would reload /login and wipe a CAPTCHA a human may be typing). Normally we get
     # here already logged in (ensure_logged_in ran first), so this just navigates.
     pre = _read_login_state(driver)
-    if pre in ("expired", "login"):
+    if pre in ("expired", "login") or (pre == "unknown" and _on_login_url(driver)):
         if pre == "expired":
             dismiss_session_expired(driver)
         raise LoginRequired(

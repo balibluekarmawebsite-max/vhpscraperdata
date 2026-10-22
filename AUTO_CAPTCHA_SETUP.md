@@ -26,6 +26,13 @@ CAPTCHA and signs in.
 3. If the login **fails**, it hands back to a human and won't keep trying
    (see Safeguards).
 
+> **It only auto-logs-in when the bot itself caught the logout** (it clicked OK on
+> the expired box, or its own page-refresh got bounced to the login page). If you
+> are **already sitting on the VHP login page** when the bot runs, it assumes
+> *you're* logging in and leaves it completely alone — it will never type over you
+> or submit under you. And if it's mid-read when you start typing the CAPTCHA, it
+> notices and backs off.
+
 If auto-CAPTCHA is off or not installed, you get the old behaviour: the window is
 left ready on the login page and you're alerted to type the CAPTCHA yourself.
 
