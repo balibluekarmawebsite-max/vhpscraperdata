@@ -1660,10 +1660,18 @@ def _set_period_inner(driver, report):
     p = report.get("period")
     # Month-picker reports (yearly-forecast): drive the Element-UI month field.
     #   "calendar_year"           -> January of the CURRENT year
-    #   {"month": "YYYY-MM"}      -> that month (used to backfill a chosen year)
+    #   "next_calendar_year"      -> January of NEXT year (dynamic)
+    #   "current_month_next_year" -> THIS month, of NEXT year (dynamic; e.g. run in
+    #                                Oct 2026 -> 10/2027. Advances each month.)
+    #   {"month": "YYYY-MM"}      -> that exact month (fixed)
     target = None
     if p == "calendar_year":
         target = datetime.date.today().replace(month=1, day=1)
+    elif p == "next_calendar_year":
+        target = datetime.date(datetime.date.today().year + 1, 1, 1)
+    elif p == "current_month_next_year":
+        t = datetime.date.today()
+        target = datetime.date(t.year + 1, t.month, 1)
     elif isinstance(p, dict) and p.get("month") and not (p.get("start") and p.get("end")):
         try:
             target = _parse_iso("{}-01".format(p["month"]))
