@@ -1661,12 +1661,16 @@ def _set_period_inner(driver, report):
     # Month-picker reports (yearly-forecast): drive the Element-UI month field.
     #   "calendar_year"           -> January of the CURRENT year
     #   "next_calendar_year"      -> January of NEXT year (dynamic)
-    #   "current_month_next_year" -> THIS month, of NEXT year (dynamic; e.g. run in
-    #                                Oct 2026 -> 10/2027. Advances each month.)
+    #   "current_month_this_year" -> THIS month, current year (dynamic; e.g. run in
+    #                                Oct 2026 -> 10/2026 = a rolling 12-month FORWARD
+    #                                view from the current month). Advances monthly.
+    #   "current_month_next_year" -> THIS month, of NEXT year (dynamic; 10/2027)
     #   {"month": "YYYY-MM"}      -> that exact month (fixed)
     target = None
     if p == "calendar_year":
         target = datetime.date.today().replace(month=1, day=1)
+    elif p == "current_month_this_year":
+        target = datetime.date.today().replace(day=1)
     elif p == "next_calendar_year":
         target = datetime.date(datetime.date.today().year + 1, 1, 1)
     elif p == "current_month_next_year":

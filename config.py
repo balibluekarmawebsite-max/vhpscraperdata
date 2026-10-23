@@ -258,28 +258,31 @@ REPORTS = [
         "period_required": True,   # skip rather than post a wrong-window CSV
     },
     {
-        # NEXT-YEAR Yearly Occupancy forecast — a SEPARATE daily pull of the SAME
-        # VHP report as yearly-forecast-of-room-occupancy, but with the month/year
-        # selector on NEXT year. It is distinct from the current-year daily pull
-        # (which also feeds /api/import section B): this one posts ONLY to
-        # /api/daily/pickup. One extra pull + one POST, per property, per day.
-        "name": "yearly-forecast-next-year",
+        # FORWARD PICKUP — a SEPARATE daily pull of the SAME VHP report as
+        # yearly-forecast-of-room-occupancy, but with the month selector on the
+        # CURRENT month (current year) so the export is a rolling 12-month FORWARD
+        # view from this month (e.g. run in Oct 2026 -> 10/2026 = Oct 2026 .. Sep
+        # 2027). This captures near-term occupancy that actually has bookings
+        # (Oct/Nov/Dec show real Room Occupied), plus forward visibility into next
+        # year. It is distinct from the current-year Jan-start pull (which also feeds
+        # /api/import section B); this one posts ONLY to /api/daily/pickup.
+        # (An earlier version used NEXT year (10/2027) but that window is all future
+        # and came back empty — the dashboard needs this month of the CURRENT year.)
+        "name": "yearly-forecast-pickup",
         "cadence": "daily",
         "url": "https://e1-vhp.com/fr/report/yearly-forecast-of-room-occupancy",
         "section": "D",        # logging only — uses its own /api/daily/pickup endpoint
-        "source": "vhp:yearly-forecast-next-year",
-        # Only endpoint: /api/daily/pickup (property + snapshotDate=today + the CSV),
-        # exactly like the current-year pickup. Same bearer token as /api/import.
+        "source": "vhp:yearly-forecast-pickup",
+        # Only endpoint: /api/daily/pickup (property + snapshotDate=today + the CSV).
+        # Same bearer token as /api/import.
         "upload": {
             "url": "https://dashboard.bluekarmasecrets.com/api/daily/pickup",
             "extra_fields": {"snapshotDate": "{today}"},
             "require_ok": False,   # idempotent daily snapshot; accept any 2xx
         },
-        # Month/year selector = THIS month, of NEXT year (dynamic). Run in Oct 2026
-        # -> 10/2027; in Nov 2026 -> 11/2027; and so on. (If the dashboard instead
-        # wants Jan of next year, use "next_calendar_year"; for this month of the
-        # CURRENT year, use "calendar_year"-style {"month": "YYYY-MM"}.)
-        "period": "current_month_next_year",
+        # Month selector = THIS month, current year (dynamic). Run in Oct 2026 ->
+        # 10/2026; Nov 2026 -> 11/2026; and so on.
+        "period": "current_month_this_year",
         "period_required": True,   # skip rather than post a wrong-window CSV
         "checkboxes": {"Show Revenue": True},
         "segment_untick": ["COMPLIMENT", "HOUSE USE"],
