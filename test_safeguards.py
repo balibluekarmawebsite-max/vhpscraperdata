@@ -97,11 +97,12 @@ def main():
           "recovery=False -> returns False (never submits a found login page)")
 
     # OCR precision gate: only a >=2 consensus returns a value.
-    check(captcha._consensus(["123456", "123456", "999999"]) == "123456",
-          "consensus: 2 of 3 agree -> value")
-    check(captcha._consensus(["111111", "222222", "333333"]) is None,
+    check(captcha._consensus(["123456", "123456", "999999"], min_votes=2) == "123456",
+          "consensus: 2 agree (min_votes=2) -> value")
+    check(captcha._consensus(["111111", "222222", "333333"], min_votes=2) is None,
           "consensus: all differ -> None")
-    check(captcha._consensus(["123456"]) is None, "consensus: single read -> None")
+    check(captcha._consensus(["123456"], min_votes=2) is None,
+          "consensus: single read -> None")
 
     passed = sum(results)
     print("\n{}/{} checks passed".format(passed, len(results)))

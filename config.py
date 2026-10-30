@@ -432,6 +432,10 @@ AUTO_CAPTCHA_COOLDOWN_SEC = 300     # min seconds between two real submits
 AUTO_CAPTCHA_MAX_FAILURES = 2       # consecutive failed logins -> auto-off
 CAPTCHA_MIN_LEN = 4                 # plausible CAPTCHA length range (digits)
 CAPTCHA_MAX_LEN = 8
+CAPTCHA_LEN = 6                     # EXACT expected length (VHP = 6 digits); 0 = use
+                                    # the MIN/MAX range only. Exact length cuts false reads.
+CAPTCHA_MIN_VOTES = 3              # how many preprocessings must agree to auto-submit
+                                    # (higher = safer/rarer; lower = more attempts)
 AUTO_CAPTCHA_KILL_FILE = os.path.join(LOGS_DIR, ".no_auto_captcha")
 
 
