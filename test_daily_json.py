@@ -85,6 +85,55 @@ def main():
     check(by2[1] == {"date": "2026-10-30", "rooms": 7},
           "count_rooms_by_date: sums a rooms column (4+3=7)")
 
+    # --- agent name normalization -------------------------------------------
+    check(dj.normalize_agent("BOOKING.COM  ") == "BOOKING.COM", "normalize: trailing spaces")
+    check(dj.normalize_agent("G2 TRAVEL, ") == "G2 TRAVEL", "normalize: trailing comma")
+    check(dj.normalize_agent("ALARIC, ") == "ALARIC", "normalize: 'ALARIC,' -> 'ALARIC'")
+    check(dj.normalize_agent("[INDIVIDUAL RESERVATION], ") == "[INDIVIDUAL RESERVATION]",
+          "normalize: individual reservation")
+    check(dj.normalize_agent("") == "", "normalize: empty")
+
+    # --- reservation-grid pickups (guest-row duplication like the real CSV) --
+    # Rsv 7294 ALARIC room 505 Nights 5 (main + AccGuest rows); 8742 BOOKING.COM
+    # room 201 Nights 2 (main + AccGuest); 9116 INDIVIDUAL room 501 Nights 3;
+    # 9517 INDIVIDUAL room 504 Nights 1. All arrive 30/10.
+    res = [
+        {"Rsv No": "7294", "Reservation Name": "ALARIC, ", "Room Number": "505",
+         "Arrival": "30/10/26", "Nights": "5"},
+        {"Rsv No": "7294", "Reservation Name": "ALARIC, ", "Room Number": "505",
+         "Arrival": "30/10/26", "Nights": "5"},   # AccGuest — must NOT double-count
+        {"Rsv No": "8742", "Reservation Name": "BOOKING.COM  ", "Room Number": "201",
+         "Arrival": "30/10/26", "Nights": "2"},
+        {"Rsv No": "8742", "Reservation Name": "BOOKING.COM  ", "Room Number": "201",
+         "Arrival": "30/10/26", "Nights": "2"},
+        {"Rsv No": "9116", "Reservation Name": "[INDIVIDUAL RESERVATION], ",
+         "Room Number": "501", "Arrival": "30/10/26", "Nights": "3"},
+        {"Rsv No": "9116", "Reservation Name": "[INDIVIDUAL RESERVATION], ",
+         "Room Number": "501", "Arrival": "30/10/26", "Nights": "3"},
+        {"Rsv No": "9517", "Reservation Name": "[INDIVIDUAL RESERVATION], ",
+         "Room Number": "504", "Arrival": "30/10/26", "Nights": "1"},
+    ]
+    deduped = dj.dedupe_reservation_rooms(res, "Rsv No", "Room Number")
+    check(len(deduped) == 4, "dedupe: 7 guest rows -> 4 reservation-rooms")
+
+    rpk = dj.aggregate_pickups_reservations(res, "Reservation Name", "Rsv No",
+                                            "Room Number", "Nights")
+    check({"agent": "ALARIC", "roomNights": 5, "reservations": 1} in rpk,
+          "res pickups: ALARIC 5 nights / 1 reservation (not 10/2)")
+    check({"agent": "BOOKING.COM", "roomNights": 2, "reservations": 1} in rpk,
+          "res pickups: BOOKING.COM 2 / 1")
+    check({"agent": "[INDIVIDUAL RESERVATION]", "roomNights": 4, "reservations": 2} in rpk,
+          "res pickups: INDIVIDUAL 4 nights (3+1) / 2 reservations")
+    check(rpk[0]["agent"] == "ALARIC", "res pickups: sorted by roomNights desc")
+
+    # distinct rooms by arrival date: all 4 rooms arrive 30/10 -> 4 (not 7 rows)
+    rd = dj.distinct_rooms_by_date(res, "Arrival", "Room Number",
+                                   ["2026-10-29", "2026-10-30", "2026-10-31"])
+    check(rd == [{"date": "2026-10-29", "rooms": 0},
+                 {"date": "2026-10-30", "rooms": 4},
+                 {"date": "2026-10-31", "rooms": 0}],
+          "distinct_rooms_by_date: 4 distinct rooms on 30/10, zero elsewhere")
+
     # --- payload envelopes ---------------------------------------------------
     rp = dj.build_reservation_payload("bkv", pk, by, today=ref)
     check(rp["property"] == "BKV", "reservation payload: property upper-cased")

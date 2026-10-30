@@ -153,6 +153,66 @@ def count_rooms_by_date(rows, date_key, dates, rooms_key=None):
     return [{"date": d, "rooms": totals[d]} for d in dates]
 
 
+def normalize_agent(name):
+    """Collapse whitespace and strip a trailing comma from a raw VHP agent name, so
+    'G2 TRAVEL, ' and 'G2 TRAVEL' (and 'BOOKING.COM  ') group as one. Otherwise the
+    name is kept verbatim ('raw agent names')."""
+    s = " ".join(str(name or "").split())   # collapse runs of whitespace
+    return s.rstrip(",").strip()
+
+
+def dedupe_reservation_rooms(rows, rsvno_key, room_key):
+    """VHP lists ONE ROW PER GUEST: a main guest plus AccGuest/RmSharer rows that
+    repeat the same (reservation, room) with Nights duplicated and Room Rate 0.
+    Collapse to one row per (reservation, room) — keeping the FIRST (main) row — so
+    room-nights / reservation / room counts aren't multiplied by the guest count."""
+    seen = set()
+    out = []
+    for r in rows:
+        key = (str(r.get(rsvno_key, "")).strip(), str(r.get(room_key, "")).strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
+def aggregate_pickups_reservations(rows, agent_key, rsvno_key, room_key, nights_key):
+    """pickups from the reservation grid -> [{agent, roomNights, reservations}].
+
+    Collapses guest rows first, then groups by NORMALIZED agent name:
+      roomNights   = sum of Nights over distinct (reservation, room)
+      reservations = count of distinct reservation numbers
+    Sorted by roomNights desc, then agent asc.
+    """
+    deduped = dedupe_reservation_rooms(rows, rsvno_key, room_key)
+    buckets = OrderedDict()  # agent -> {"roomNights": n, "resids": set()}
+    for r in deduped:
+        agent = normalize_agent(r.get(agent_key, ""))
+        b = buckets.setdefault(agent, {"roomNights": 0, "resids": set()})
+        b["roomNights"] += _to_number(r.get(nights_key), 0)
+        rid = str(r.get(rsvno_key, "")).strip()
+        if rid:
+            b["resids"].add(rid)
+    out = [{"agent": a, "roomNights": b["roomNights"], "reservations": len(b["resids"])}
+           for a, b in buckets.items()]
+    out.sort(key=lambda e: (-e["roomNights"], e["agent"]))
+    return out
+
+
+def distinct_rooms_by_date(rows, date_key, room_key, dates):
+    """Rooms per date counting DISTINCT room numbers (VHP repeats a room once per
+    guest) -> [{date, rooms}] for exactly `dates`, in order, zero-filled."""
+    sets = {d: set() for d in dates}
+    for r in rows:
+        iso = to_iso(r.get(date_key))
+        if iso in sets:
+            room = str(r.get(room_key, "")).strip()
+            if room:
+                sets[iso].add(room)
+    return [{"date": d, "rooms": len(sets[d])} for d in dates]
+
+
 def _envelope(property_code, snapshot_date=None, today=None):
     return {
         "property": property_code.upper(),
