@@ -834,6 +834,12 @@ def _period_range(report):
         # Explicit range wins — an on-demand job set exact dates; honour them as-is.
         if p.get("start") and p.get("end"):
             return _parse_iso(p["start"]), _parse_iso(p["end"])
+        # Offset range relative to today, e.g. {"from_days": -1, "to_days": 1} ->
+        # yesterday .. tomorrow (the daily reservation arrivals window).
+        if "from_days" in p or "to_days" in p:
+            fd = int(p.get("from_days", 0))
+            td = int(p.get("to_days", 0))
+            return today + datetime.timedelta(days=fd), today + datetime.timedelta(days=td)
         n = max(1, int(p.get("days_back", 7)))
         end = today if p.get("include_today", True) else today - datetime.timedelta(days=1)
         return end - datetime.timedelta(days=n - 1), end
@@ -1813,6 +1819,124 @@ def _set_period_inner(driver, report):
     return False
 
 
+def _qfield_by_label(driver, label):
+    """The visible .q-field whose label matches `label` (case/space-insensitive,
+    exact first then substring), or None."""
+    want = " ".join(label.strip().lower().split())
+    cands = []
+    for f in driver.find_elements(By.CSS_SELECTOR, ".q-field"):
+        try:
+            if not f.is_displayed():
+                continue
+            lab = f.find_elements(By.CSS_SELECTOR, ".q-field__label")
+            txt = " ".join((lab[0].text or "").strip().lower().split()) if lab else ""
+            if txt == want:
+                return f
+            if want and want in txt:
+                cands.append(f)
+        except Exception:  # noqa: BLE001 - stale element, keep looking
+            continue
+    return cands[0] if cands else None
+
+
+def _same_date(shown, date):
+    """True if the DD/MM/YY (or DD/MM/YYYY) string `shown` is the given date."""
+    s = (shown or "").strip()
+    for fmt in ("%d/%m/%y", "%d/%m/%Y"):
+        try:
+            return datetime.datetime.strptime(s, fmt).date() == date
+        except ValueError:
+            continue
+    return False
+
+
+def set_single_date(driver, label, date, settle=0.6):
+    """Set a SINGLE-date q-field (e.g. the room-departure 'To Date') to `date`
+    (datetime.date), shown DD/MM/YY. Tries typing, then a JS value-set, then the
+    calendar popup, verifying the field reads back the wanted date each time.
+    Prints a diagnostic (field HTML) if it can't. Self-contained; never raises."""
+    want = date.strftime(_VHP_DATE_FMT)  # DD/MM/YY
+    try:
+        field = None
+        end = time.time() + 15
+        while time.time() < end:
+            field = _qfield_by_label(driver, label)
+            if field is not None:
+                break
+            time.sleep(0.5)
+        if field is None:
+            print("    (to-date) no {!r} field found. Labels: {}".format(
+                label, ", ".join(_field_labels(driver)) or "(none)"))
+            return False
+
+        def _val():
+            try:
+                ins = _visible_inputs(field)
+                return (ins[0].get_attribute("value") or "").strip() if ins else ""
+            except Exception:  # noqa: BLE001
+                return ""
+
+        print("    (to-date) want {} | {!r} shows: {}".format(want, label, _val() or "(blank)"))
+
+        # 1) type into an editable input
+        for inp in _editable_inputs(field):
+            try:
+                inp.click()
+                time.sleep(0.2)
+                inp.send_keys(Keys.CONTROL, "a")
+                inp.send_keys(Keys.DELETE)
+                inp.send_keys(want)
+                time.sleep(0.3)
+                inp.send_keys(Keys.ENTER)
+                time.sleep(settle)
+            except Exception as exc:  # noqa: BLE001
+                print("    (to-date) typing failed: {}".format(_describe(exc)))
+            _close_overlays(driver)
+            if _same_date(_val(), date):
+                print("    (to-date) set {} by typing".format(want))
+                return True
+            break  # only the first editable input
+
+        # 2) JS value-set (for a readonly input Quasar still honours via events)
+        try:
+            ins = _visible_inputs(field)
+            if ins:
+                driver.execute_script(_JS_SET_INPUT, ins[0], want)
+                time.sleep(settle)
+                if _same_date(_val(), date):
+                    print("    (to-date) set {} via JS".format(want))
+                    return True
+        except Exception as exc:  # noqa: BLE001
+            print("    (to-date) JS set failed: {}".format(_describe(exc)))
+
+        # 3) open the popup + click the calendar day
+        try:
+            ins = _visible_inputs(field)
+            if ins:
+                ins[0].click()
+                time.sleep(0.6)
+            if _click_vc_day(driver, date):
+                time.sleep(settle)
+                _close_overlays(driver)
+                if _same_date(_val(), date):
+                    print("    (to-date) set {} via calendar".format(want))
+                    return True
+        except Exception as exc:  # noqa: BLE001
+            print("    (to-date) calendar failed: {}".format(_describe(exc)))
+        _close_overlays(driver)
+
+        print("    (to-date) WARNING could not set {!r} to {} (shows {}). Field HTML: {}"
+              .format(label, want, _val() or "(blank)", _el_html(driver, field)))
+        return False
+    except Exception as exc:  # noqa: BLE001 - must never abort the scrape
+        print("    (to-date) error: {}".format(_describe(exc)))
+        try:
+            _close_overlays(driver)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
 def _select_radio(driver, label):
     """Select a Quasar radio (role='radio') by its aria-label OR visible text
     (e.g. 'Cancel Date' vs 'Check-in Date'). Clicks and VERIFIES that aria-checked
@@ -2483,6 +2607,17 @@ def scrape_report(driver, prop, report, download_dir):
     configure_report(driver, report)  # best-effort filter settings (non-fatal)
     step("click SEARCH", lambda: click_search(driver))
     step("wait for data", lambda: wait_for_report_data(driver))
+    return export_and_download(driver, prop, report["name"], download_dir, step=step)
+
+
+def export_and_download(driver, prop, report_name, download_dir, step=None):
+    """Settle the grid, (re)assert the download dir, press Print -> CSV, wait for the
+    file, and return its renamed path. Shared by scrape_report and the daily-JSON
+    departure flow (which re-exports the same page once per target date). `step`, if
+    given, wraps each sub-step so failures read like '[export Print CSV] ...'."""
+    def _run(name, fn):
+        return step(name, fn) if step else fn()
+
     time.sleep(1)  # let the grid settle before exporting
     # Re-assert the download directory (page navigation can reset it).
     for _cmd in ("Browser.setDownloadBehavior", "Page.setDownloadBehavior"):
@@ -2490,9 +2625,9 @@ def scrape_report(driver, prop, report, download_dir):
             driver.execute_cdp_cmd(_cmd, {"behavior": "allow", "downloadPath": download_dir})
         except Exception:  # noqa: BLE001
             pass
-    _before = snapshot_dirs(config.DOWNLOAD_WATCH)  # snapshot BEFORE the click
-    _since = time.time()                            # mtime floor for the download
-    step("export Print CSV", lambda: export_print_csv(driver))
-    raw = step("wait for download",
-               lambda: wait_for_download(config.DOWNLOAD_WATCH, before=_before, since=_since))
-    return rename_download(raw, prop["code"], report["name"], download_dir)
+    before = snapshot_dirs(config.DOWNLOAD_WATCH)  # snapshot BEFORE the click
+    since = time.time()                            # mtime floor for the download
+    _run("export Print CSV", lambda: export_print_csv(driver))
+    raw = _run("wait for download",
+               lambda: wait_for_download(config.DOWNLOAD_WATCH, before=before, since=since))
+    return rename_download(raw, prop["code"], report_name, download_dir)

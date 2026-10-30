@@ -90,16 +90,45 @@ def _to_number(value, default=0):
     return int(n) if float(n).is_integer() else n
 
 
-def read_csv_rows(path, encoding="utf-8-sig"):
-    """Read a downloaded CSV into a list of dict rows (header-keyed). utf-8-sig
-    strips a BOM if present. Keys are the CSV's own column headers (stripped)."""
-    with open(path, "r", encoding=encoding, newline="") as fh:
-        reader = csv.DictReader(fh)
-        rows = []
-        for raw in reader:
-            rows.append({(k or "").strip(): (v if v is not None else "")
-                         for k, v in raw.items()})
-        return rows
+def _read_text(path):
+    """Read a CSV file's text, tolerating VHP's encoding. utf-8-sig strips a BOM;
+    fall back to cp1252/latin-1 for the odd non-UTF-8 byte in a guest name."""
+    for enc in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            with open(path, "r", encoding=enc, newline="") as fh:
+                return fh.read()
+        except UnicodeDecodeError:
+            continue
+    with open(path, "r", encoding="utf-8", errors="replace", newline="") as fh:
+        return fh.read()
+
+
+def read_csv_rows(path):
+    """Read a downloaded VHP CSV into a list of dict rows (header-keyed).
+
+    VHP's export starts with a blank line and a row of EMPTY cells BEFORE the real
+    header (e.g. 'Rsv No','Reservation Name',... is the 3rd line), so we can't use a
+    plain DictReader. We find the header as the first row with any non-empty cell,
+    map the rows after it, and skip blank separator rows. Duplicate header names
+    (VHP repeats 'Flight Number') collapse to the last column — fine, those aren't
+    columns we read."""
+    import io
+    rows = list(csv.reader(io.StringIO(_read_text(path))))
+    header_idx = next((i for i, r in enumerate(rows)
+                       if any((c or "").strip() for c in r)), None)
+    if header_idx is None:
+        return []
+    header = [(c or "").strip() for c in rows[header_idx]]
+    out = []
+    for r in rows[header_idx + 1:]:
+        if not any((c or "").strip() for c in r):
+            continue  # blank separator row
+        d = {}
+        for j, key in enumerate(header):
+            if key:
+                d[key] = r[j] if j < len(r) else ""
+        out.append(d)
+    return out
 
 
 def aggregate_pickups(rows, agent_key, nights_key, resid_key=None):

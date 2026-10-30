@@ -146,6 +146,43 @@ def main():
     check(dp["snapshotDate"] == "2026-10-25", "departure payload: explicit snapshotDate honored")
     check(dp["departures"] == by2, "departure payload: carries departures")
 
+    # --- read_csv_rows: VHP's blank-line + empty-row preamble before the header --
+    import os
+    import tempfile
+    # Mirrors the real export: line 1 blank, line 2 all-empty cells, line 3 header,
+    # then guest-duplicated data rows (FAKE names — no real PII).
+    csv_text = (
+        "\n"
+        '"","","","","","",""\n'
+        '"Rsv No","Reservation Name","Guest Name","Room Number","Arrival","Departure","Nights"\n'
+        '"7294","ALARIC, ","Guest One MRS","505","30/10/26","04/11/26","5"\n'
+        '"7294","ALARIC, ","Guest Two MR","505","30/10/26","04/11/26","5"\n'
+        '"8742","BOOKING.COM  ","Guest Three MR","201","29/10/26","01/11/26","2"\n'
+        '\n'  # blank separator row in the middle
+        '"9517","G2 TRAVEL","Guest Four","504","31/10/26","01/11/26","1"\n'
+    )
+    fd, p = tempfile.mkstemp(suffix=".csv")
+    os.close(fd)
+    with open(p, "w", encoding="utf-8-sig", newline="") as fh:
+        fh.write(csv_text)
+    try:
+        prows = dj.read_csv_rows(p)
+        check(len(prows) == 4, "read_csv_rows: skips preamble + blank rows -> 4 data rows")
+        check(prows[0].get("Rsv No") == "7294" and prows[0].get("Reservation Name") == "ALARIC, ",
+              "read_csv_rows: header mapped correctly past the empty preamble")
+        pk_real = dj.aggregate_pickups_reservations(prows, "Reservation Name", "Rsv No",
+                                                    "Room Number", "Nights")
+        check({"agent": "ALARIC", "roomNights": 5, "reservations": 1} in pk_real,
+              "read_csv_rows+pickups: ALARIC 5/1 (guest rows collapsed)")
+        arr_real = dj.distinct_rooms_by_date(prows, "Arrival", "Room Number",
+                                             ["2026-10-29", "2026-10-30", "2026-10-31"])
+        check(arr_real == [{"date": "2026-10-29", "rooms": 1},
+                           {"date": "2026-10-30", "rooms": 1},
+                           {"date": "2026-10-31", "rooms": 1}],
+              "read_csv_rows+arrivals: 1 distinct room each on 29/30/31")
+    finally:
+        os.remove(p)
+
     passed = sum(results)
     print("\n{}/{} checks passed".format(passed, len(results)))
     return 0 if passed == len(results) else 1

@@ -307,6 +307,79 @@ REPORTS = [
 ]
 
 # ---------------------------------------------------------------------------
+# DAILY JSON FEEDS — derived reports that POST aggregated JSON (not a raw CSV)
+# ---------------------------------------------------------------------------
+# These two are NOT in REPORTS above because they don't follow the CSV-upload
+# path: the scraper reads the page's CSV export, aggregates it, and POSTs a small
+# JSON body (daily_reports.py + daily_json.py). Kept here so the daily run and the
+# standalone tester (run_daily_json.py) share one definition without disturbing
+# the proven CSV reports. Column names are the live BKV export headers.
+DAILY_JSON_REPORTS = [
+    {
+        # RESERVATION -> POST /api/daily/reservation
+        #   arrivals[]: distinct rooms arriving yesterday / today / tomorrow
+        #   pickups[] : those arrivals grouped by (raw) agent -> roomNights + reservations
+        # One pull: Arrival Date range = yesterday..tomorrow, then split by date.
+        "name": "reservation-daily",
+        "kind": "json_reservation",
+        "cadence": "daily",
+        "url": "https://e1-vhp.com/fr/reservation",
+        "period": {"from_days": -1, "to_days": 1},   # yesterday .. tomorrow
+        "period_required": True,   # skip rather than send a wrong-window payload
+        "section": "D",            # logging only — uses its own JSON endpoint
+        "source": "vhp:reservation-daily",
+        "upload": {
+            "url": "https://dashboard.bluekarmasecrets.com/api/daily/reservation",
+            "require_ok": False,   # idempotent daily snapshot; accept any 2xx
+            # If this endpoint uses a DIFFERENT bearer token than /api/import, add
+            #   "token_file": "reservation_token.txt",  (git-ignored) or
+            #   "token_env": "RESERVATION_API_TOKEN".
+        },
+        "columns": {
+            "agent": "Reservation Name",
+            "rsvno": "Rsv No",
+            "room": "Room Number",
+            "arrival": "Arrival",
+            "departure": "Departure",
+            "nights": "Nights",
+        },
+    },
+    {
+        # ROOM DEPARTURE -> POST /api/daily/departure
+        #   departures[]: distinct rooms departing yesterday / today / tomorrow
+        # The Expected-Departure view is anchored on a single "To Date" that shows
+        # guests in-house AS OF that date (Arrival <= ToDate, Departure > ToDate), so
+        # rooms departing on D come from the pull with To Date = D-1 (filtered to
+        # Depature == D). That's one pull per target date (3 per run).
+        "name": "room-departure-daily",
+        "kind": "json_departure",
+        "cadence": "daily",
+        "url": "https://e1-vhp.com/to/telephone-operator",
+        "section": "D",
+        "source": "vhp:room-departure-daily",
+        "upload": {
+            "url": "https://dashboard.bluekarmasecrets.com/api/daily/departure",
+            "require_ok": False,
+        },
+        "dropdowns": {"Display": "Expected Departure"},
+        "to_date_label": "To Date",
+        "columns": {
+            "agent": "Reservation Name",
+            "room": "Room Number",
+            "arrival": "Arrival",
+            "departure": "Depature",   # NOTE: VHP's column header is misspelled
+            "rsvno": "Reservation Number",
+        },
+    },
+]
+
+
+def daily_json_report(name):
+    """Look up a DAILY_JSON_REPORTS entry by name (reservation-daily /
+    room-departure-daily), or None."""
+    return next((r for r in DAILY_JSON_REPORTS if r["name"] == name), None)
+
+# ---------------------------------------------------------------------------
 # UPLOAD
 # ---------------------------------------------------------------------------
 # The scraper POSTs each downloaded file to the dashboard, which runs its
