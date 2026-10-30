@@ -99,12 +99,27 @@ def run_departure(driver, prop, report, download_dir, today=None,
         vhp.open_report(driver, report)             # has a SEARCH button
         vhp.dismiss_blocking_dialog(driver)
         vhp.configure_report(driver, report)        # Display = Expected Departure
+        # GATE: the whole To-Date model ("in-house as of To Date") is only valid
+        # under the required view, so verify the dropdown actually stuck (rather
+        # than trusting configure_report, which is best-effort and swallows errors).
+        for lbl, val in (report.get("dropdowns") or {}).items():
+            if not vhp.dropdown_shows(driver, lbl, val):
+                raise RuntimeError(
+                    "[display] required dropdown {!r}={!r} not active — skipping "
+                    "room-departure to avoid a wrong count".format(lbl, val))
         if not vhp.set_single_date(driver, label, to_date):
             raise RuntimeError(
                 "[to-date] could not set {!r} to {} — skipping room-departure to "
                 "avoid a wrong count".format(label, to_date.strftime("%d/%m/%y")))
         vhp.click_search(driver)
-        vhp.wait_for_report_data(driver)
+        # A legitimately empty in-house list (zero guests as of To Date) is a real
+        # 0, not a failure — don't let it abort the other two dates.
+        state = vhp.wait_for_report_ready(driver)
+        if state == "empty":
+            _log(logger, "    grid empty (no in-house guests as of {}) -> 0 rooms "
+                 "depart {}".format(to_date.strftime("%d/%m/%y"), d_iso))
+            departures.append({"date": d_iso, "rooms": 0})
+            continue
         path = vhp.export_and_download(
             driver, prop, "{}-{}".format(report["name"], d_iso), download_dir)
         rows = dj.read_csv_rows(path)

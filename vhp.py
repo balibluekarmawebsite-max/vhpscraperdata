@@ -2105,6 +2105,18 @@ def _dropdown_value(driver, field):
         return ""
 
 
+def dropdown_shows(driver, label, want):
+    """True if the single-select dropdown `label` currently displays `want`
+    (case-insensitive substring of the field's text). Used to GATE a report on a
+    required dropdown — e.g. room-departure's entire To-Date model is only valid
+    while Display = 'Expected Departure', so we verify it stuck rather than trusting
+    the best-effort configure_report."""
+    field = _dropdown_field(driver, label)
+    if field is None:
+        return False
+    return want.strip().lower() in _dropdown_value(driver, field).lower()
+
+
 def _dropdown_labels_diag(driver):
     """Print the dropdown field labels actually on the page — so when a label isn't
     found we can see what to target (same idea as the radio/segment diagnostics)."""
@@ -2357,6 +2369,37 @@ def wait_for_report_data(driver, timeout=60):
             return
         time.sleep(1)
     raise TimeoutError("report data did not load after SEARCH")
+
+
+def wait_for_report_ready(driver, timeout=60, settle=4.0, min_wait=6.0):
+    """Like wait_for_report_data but distinguishes a LEGITIMATELY EMPTY grid from a
+    page that never loaded — returns 'data' if real cells appeared, or 'empty' once
+    the loading spinner has cleared and the grid has stayed empty for `settle`
+    seconds (after a `min_wait` floor so slow XHR isn't called empty too early).
+    Raises TimeoutError only if neither happens (a genuine load failure).
+
+    Needed by the room-departure flow: the Expected-Departure view at To Date = D-1
+    can correctly be empty (zero in-house guests), which must report rooms=0, not
+    abort all three dates."""
+    start = time.time()
+    end = start + timeout
+    calm_since = None
+    spin_sel = ".q-inner-loading, .q-spinner, .q-loading-bar, .q-loading"
+    while time.time() < end:
+        cells = driver.find_elements(By.CSS_SELECTOR, "table.q-table td")
+        if sum(1 for c in cells if c.text.strip()) >= 3:
+            return "data"
+        spinning = any(_disp_safe(e) for e in driver.find_elements(By.CSS_SELECTOR, spin_sel))
+        now = time.time()
+        if spinning:
+            calm_since = None
+        else:
+            if calm_since is None:
+                calm_since = now
+            if now - start >= min_wait and now - calm_since >= settle:
+                return "empty"
+        time.sleep(0.5)
+    raise TimeoutError("report grid did not settle (no data and no empty-state)")
 
 
 def _visible_menu_items(driver):
