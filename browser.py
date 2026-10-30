@@ -9,12 +9,20 @@ Critical rules (see README "Hard constraints"):
   * Headed (visible) Chrome — VHP + Win7 behave better visible than headless.
 """
 import os
+import socket
+import subprocess
+import time
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
 import config
+
+
+class WindowLaunchError(Exception):
+    """A property's Chrome window was closed and could not be re-opened
+    (chrome.exe not found, or the debug port never came up after launch)."""
 
 
 def make_driver(profile_dir, download_dir, headless=False):
@@ -135,4 +143,168 @@ def make_driver_attached(debug_port, download_dir):
             break
         except Exception:  # noqa: BLE001 - try the next CDP command name
             continue
+    return driver
+
+
+# ---------------------------------------------------------------------------
+# Auto-reopen a CLOSED window (self-heal after a PC restart / Chrome crash)
+# ---------------------------------------------------------------------------
+_CHROME_CANDIDATES = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+]
+
+
+def find_chrome():
+    """Locate chrome.exe: config.CHROME_PATH / CHROME_PATH env first, then the usual
+    install paths. Returns the path, or None if not found."""
+    cands = []
+    cfg = getattr(config, "CHROME_PATH", "") or os.environ.get("CHROME_PATH", "")
+    if cfg:
+        cands.append(cfg)
+    cands.extend(_CHROME_CANDIDATES)
+    for c in cands:
+        try:
+            if c and os.path.isfile(c):
+                return c
+        except OSError:
+            continue
+    return None
+
+
+def _port_open(port, timeout=1.0):
+    """True if something is listening on 127.0.0.1:port (the debug port is up)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        return s.connect_ex(("127.0.0.1", int(port))) == 0
+    except OSError:
+        return False
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def _kill_chrome_for_port(port):
+    """Kill ONLY the scraper's own Chrome for this debug port — a hung instance that
+    still holds the profile so a fresh launch can't open the port. Matches on
+    '--remote-debugging-port=<port>', which a normal/ personal Chrome never has, so
+    this can never close the user's own browsing. Best-effort, Windows-only."""
+    if os.name != "nt":
+        return
+    needle = "--remote-debugging-port={}".format(int(port))
+    try:
+        out = subprocess.check_output(
+            'wmic process where "name=\'chrome.exe\'" get ProcessId,CommandLine '
+            '/format:list', shell=True, stderr=subprocess.DEVNULL,
+            universal_newlines=True)
+    except Exception:  # noqa: BLE001 - wmic missing/failed -> skip (just launch)
+        return
+    want = False  # /format:list prints CommandLine= then ProcessId= per process
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("CommandLine="):
+            # Exact-token match (not a substring) so port 9222 never matches a
+            # cmdline that uses e.g. 92220; the user's own Chrome has no such flag.
+            want = needle in line[len("CommandLine="):].split()
+        elif line.startswith("ProcessId=") and want:
+            pid = line[len("ProcessId="):].strip()
+            if pid.isdigit():
+                try:
+                    subprocess.call("taskkill /F /PID {} >nul 2>&1".format(pid),
+                                    shell=True)
+                except Exception:  # noqa: BLE001
+                    pass
+            want = False
+
+
+def launch_chrome(prop, logger=None):
+    """(Re)launch the property's Chrome window — detached, same flags as
+    open-<code>.bat, on the VHP login page. Returns True if the launch was issued
+    (the caller then waits for the port + attaches). Never raises."""
+    chrome = find_chrome()
+    if not chrome:
+        if logger:
+            logger.error("[%s] cannot auto-reopen: chrome.exe not found "
+                         "(set the CHROME_PATH env var)", prop.get("code"))
+        return False
+    try:
+        os.makedirs(prop["profile"], exist_ok=True)
+    except OSError:
+        pass
+    flags = " ".join(getattr(config, "CHROME_LAUNCH_FLAGS", []) or [])
+    url = prop.get("home_url") or "https://e1-vhp.com/login"
+    # cmd's START fully detaches the window so it survives this process exiting
+    # (exactly like open-<code>.bat). Quote the exe / profile / url for spaces.
+    cmd = ('start "" "{chrome}" --remote-debugging-port={port} '
+           '--user-data-dir="{profile}" {flags} "{url}"').format(
+        chrome=chrome, port=int(prop["debug_port"]), profile=prop["profile"],
+        flags=flags, url=url)
+    try:
+        subprocess.Popen(cmd, shell=True, close_fds=True)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        if logger:
+            logger.error("[%s] failed to launch Chrome: %s", prop.get("code"), exc)
+        return False
+
+
+def ensure_window(prop, download_dir, logger=None, launch_wait=35):
+    """Attach to the property's Chrome window, RE-LAUNCHING it if it's closed.
+
+    * If the window is open, attach and return the driver (the normal flow then
+      handles login, respecting the human-presence rules).
+    * If the window is CLOSED/unreachable, kill any hung Chrome still holding its
+      debug port, launch a fresh window (detached, on the login page), wait for the
+      port, attach, and — since the bot itself just opened it, so no human is on it
+      — try the opt-in auto-login once. Returns a driver that is logged in (if
+      auto-login succeeded) or sitting on the login page (for a human / the next
+      keep-alive tick).
+
+    Raises WindowLaunchError if the window can't be brought up (chrome.exe missing,
+    or the port never comes up), so the caller logs it and moves on to the next
+    property."""
+    try:
+        return make_driver_attached(prop["debug_port"], download_dir)
+    except Exception:  # noqa: BLE001 - window not open / not reachable -> re-launch
+        pass
+
+    if logger:
+        logger.warning("[%s] window on port %s is closed — auto-reopening it",
+                        prop.get("code"), prop.get("debug_port"))
+    _kill_chrome_for_port(prop["debug_port"])
+    if not launch_chrome(prop, logger):
+        raise WindowLaunchError(
+            "could not auto-reopen the {} window (chrome.exe not found?)".format(
+                prop.get("code")))
+
+    deadline = time.time() + launch_wait
+    last = None
+    driver = None
+    while time.time() < deadline:
+        if _port_open(prop["debug_port"]):
+            kill_stale_chromedrivers()  # clear any failed-attach chromedrivers
+            try:
+                driver = make_driver_attached(prop["debug_port"], download_dir)
+                break
+            except Exception as exc:  # noqa: BLE001 - port up but attach raced; retry
+                last = exc
+        time.sleep(1.5)
+    if driver is None:
+        raise WindowLaunchError(
+            "auto-reopened the {} window but its debug port {} never came up "
+            "({})".format(prop.get("code"), prop.get("debug_port"), last))
+
+    if logger:
+        logger.info("[%s] window re-opened; attempting auto-login", prop.get("code"))
+    # Fresh, bot-opened window -> definitely no human on it -> auto-login is safe.
+    try:
+        import vhp  # lazy import avoids any import-order coupling
+        vhp.attempt_auto_login(driver, prop, recovery=True, logger=logger)
+    except Exception as exc:  # noqa: BLE001 - best-effort; caller re-checks login
+        if logger:
+            logger.info("[%s] post-reopen auto-login not completed: %s",
+                        prop.get("code"), exc)
     return driver

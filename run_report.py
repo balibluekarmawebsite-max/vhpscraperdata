@@ -18,7 +18,7 @@ import datetime
 import sys
 
 import config
-from browser import kill_stale_chromedrivers, make_driver_attached
+from browser import ensure_window, kill_stale_chromedrivers
 from runlock import RunLock
 from uploader import UploadError, upload
 from vhp import LoginRequired, ensure_logged_in, scrape_report
@@ -76,7 +76,7 @@ def main(argv):
             tag = "{}/{}".format(prop["code"], name)
             print("\n=== {} ===".format(tag))
             try:
-                driver = make_driver_attached(prop["debug_port"], config.DOWNLOADS_DIR)
+                driver = ensure_window(prop, config.DOWNLOADS_DIR)
                 ensure_logged_in(driver, prop, None, report["url"])
                 path = scrape_report(driver, prop, report, config.DOWNLOADS_DIR)
                 print("  downloaded -> {}".format(path))

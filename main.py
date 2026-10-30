@@ -19,7 +19,7 @@ import subprocess
 import sys
 
 import config
-from browser import kill_stale_chromedrivers, make_driver_attached
+from browser import ensure_window, kill_stale_chromedrivers
 from runlock import RunLock
 from uploader import UploadError, upload
 from vhp import LoginRequired, ensure_logged_in, scrape_report
@@ -108,9 +108,11 @@ def run_property(logger, prop, reports):
         return 0, len(reports)
 
     try:
-        driver = make_driver_attached(prop["debug_port"], config.DOWNLOADS_DIR)
-    except Exception as exc:  # noqa: BLE001 - window not open / not reachable
-        logger.error("[%s] cannot attach to its Chrome window on port %s "
+        # Attach to the window — or auto-reopen it if it got closed (PC restart /
+        # crash), so a scheduled run self-heals instead of failing the property.
+        driver = ensure_window(prop, config.DOWNLOADS_DIR, logger)
+    except Exception as exc:  # noqa: BLE001 - window closed AND couldn't be reopened
+        logger.error("[%s] cannot attach to or reopen its Chrome window on port %s "
                      "(open it with open-%s.bat): %s",
                      prop["code"], prop.get("debug_port"), prop["code"], exc)
         return 0, len(reports)

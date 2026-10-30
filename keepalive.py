@@ -36,7 +36,7 @@ import time
 from logging.handlers import RotatingFileHandler
 
 import config
-from browser import kill_stale_chromedrivers, make_driver_attached
+from browser import ensure_window, kill_stale_chromedrivers
 from runlock import RunLock
 from vhp import (LoginRequired, _captcha_reset, _on_login_url, _read_login_state,
                  attempt_auto_login, click_search, dismiss_session_expired,
@@ -71,9 +71,11 @@ def touch_property(logger, prop, report, do_search):
     """Attach to one window and give it an authenticated nudge. Returns one of
     'ok' / 'logged_out' / 'error'. Never raises (the other properties still run)."""
     try:
-        driver = make_driver_attached(prop["debug_port"], config.DOWNLOADS_DIR)
-    except Exception as exc:  # noqa: BLE001 - window not open / not reachable
-        logger.warning("[%s] cannot attach to its Chrome window on port %s "
+        # Attach — or auto-reopen the window if it got closed (PC restart / crash),
+        # so a closed window is brought back within one keep-alive tick.
+        driver = ensure_window(prop, config.DOWNLOADS_DIR, logger)
+    except Exception as exc:  # noqa: BLE001 - window closed AND couldn't be reopened
+        logger.warning("[%s] cannot attach to or reopen its Chrome window on port %s "
                        "(is open-%s.bat running?): %s",
                        prop["code"], prop.get("debug_port"), prop["code"], _describe(exc))
         return "error"

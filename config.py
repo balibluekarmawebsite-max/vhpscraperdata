@@ -31,6 +31,23 @@ CHROMEDRIVER_PATH = os.path.join(
     BASE, "chromedriver.exe" if os.name == "nt" else "chromedriver"
 )
 
+# Chrome executable — used to RE-LAUNCH a property's window if the scraper finds it
+# CLOSED (self-heal after a PC restart / crash). Empty = auto-detect the usual
+# install paths; override with the CHROME_PATH env var if Chrome lives elsewhere.
+CHROME_PATH = os.environ.get("CHROME_PATH", "")
+# Launch flags for an auto-reopened window. KEEP IN SYNC with open-*.bat (memory
+# trim + keep-awake). The per-property --remote-debugging-port and --user-data-dir
+# are added by browser.launch_chrome(); the login URL is the property's home_url.
+CHROME_LAUNCH_FLAGS = [
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-features=CalculateNativeWinOcclusion",
+]
+
 
 # ---------------------------------------------------------------------------
 # DASHBOARD TOKEN (resolved once, used by UPLOAD + JOBS below)

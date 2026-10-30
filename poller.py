@@ -34,7 +34,7 @@ import time
 import requests
 
 import config
-from browser import kill_stale_chromedrivers, make_driver_attached
+from browser import ensure_window, kill_stale_chromedrivers
 from runlock import RunLock
 from uploader import UploadError, upload
 from vhp import LoginRequired, _parse_iso, ensure_logged_in, scrape_report
@@ -268,11 +268,11 @@ def _scrape_and_upload(logger, report, prop, job_id):
     outcome. Assumes the Chrome lock is already held by the caller."""
     tag = "{}/{}#{}".format(prop["code"], report["name"], job_id)
     try:
-        driver = make_driver_attached(prop["debug_port"], config.DOWNLOADS_DIR)
-    except Exception as exc:  # noqa: BLE001
+        driver = ensure_window(prop, config.DOWNLOADS_DIR)
+    except Exception as exc:  # noqa: BLE001 - window closed AND couldn't be reopened
         return ("failed",
-                "cannot attach to the {} Chrome window on port {} — is it open "
-                "(open-{}.bat) and logged into VHP? {}".format(
+                "cannot attach to or reopen the {} Chrome window on port {} — is it "
+                "open (open-{}.bat) and logged into VHP? {}".format(
                     prop["code"], prop.get("debug_port"), prop["code"], _describe(exc)),
                 None)
     try:
