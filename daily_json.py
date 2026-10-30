@@ -1,0 +1,176 @@
+"""
+daily_json.py — build the JSON bodies for the two daily "derived" pushes that are
+NOT a raw CSV upload:
+
+    POST /api/daily/reservation   {property, snapshotDate, pickups[], arrivals[]}
+    POST /api/daily/departure     {property, snapshotDate, departures[]}
+
+Unlike the CSV reports (yearly-forecast / cancellation), these endpoints want a
+SMALL aggregated JSON, so the scraper reads rows off the VHP page (via a CSV
+export or a DOM table — see vhp.read_rows_* / the reservation+departure scrape
+flow) and this module turns those rows into the agreed shapes:
+
+    pickups    : new bookings ENTERED yesterday, grouped by (raw) agent name ->
+                 [{agent, roomNights, reservations}]
+    arrivals   : rooms ARRIVING on prev-day / today / tomorrow ->
+                 [{date, rooms}]   (3 entries, ISO dates)
+    departures : rooms DEPARTING on prev-day / today / tomorrow ->
+                 [{date, rooms}]   (3 entries, ISO dates)
+
+Everything here is PURE (no Selenium, no network) so it is unit-tested in
+test_daily_json.py. The actual posting is uploader.post_json(); the actual
+row-reading is in vhp.py. The exact column names / date format from the live
+pages are passed in by the caller (config), so once we've seen a sample export
+we pin them in config.REPORTS without touching this logic.
+"""
+import csv
+import datetime
+from collections import OrderedDict
+
+# Date formats VHP has been seen to render in exported CSVs / grids. We try each
+# in order when normalizing a row's date cell to an ISO 'YYYY-MM-DD' string.
+_DATE_FORMATS = (
+    "%Y-%m-%d",      # already ISO
+    "%d/%m/%y",      # 29/10/26  (VHP's Date filter format, _VHP_DATE_FMT)
+    "%d/%m/%Y",      # 29/10/2026
+    "%d-%m-%Y",
+    "%d-%m-%y",
+    "%m/%d/%Y",
+    "%m/%d/%y",
+    "%d %b %Y",      # 29 Oct 2026
+    "%d %B %Y",
+    "%Y/%m/%d",
+)
+
+
+def prev_today_tomorrow(today=None):
+    """The three ISO dates the arrivals/departures feeds report: yesterday, today,
+    tomorrow. (Caller passes `today` in tests; defaults to date.today().)"""
+    d = today or datetime.date.today()
+    return [(d + datetime.timedelta(days=delta)).isoformat() for delta in (-1, 0, 1)]
+
+
+def to_iso(value):
+    """Normalize one date cell to 'YYYY-MM-DD', or None if it can't be parsed.
+    Accepts a date/datetime or a string in any of _DATE_FORMATS."""
+    if value is None:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value.date().isoformat()
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    s = str(value).strip()
+    if not s:
+        return None
+    # Keep only the date part if a time tags along ("29/10/26 14:30").
+    s = s.split(" ")[0] if "/" in s or "-" in s else s
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def _to_number(value, default=0):
+    """Parse a cell to a number (int if whole). Tolerates thousands separators,
+    stray spaces and a trailing '.00'. Returns `default` on anything unparseable."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        n = value
+    else:
+        s = str(value).strip().replace(",", "").replace(" ", "")
+        if not s:
+            return default
+        try:
+            n = float(s)
+        except ValueError:
+            return default
+    return int(n) if float(n).is_integer() else n
+
+
+def read_csv_rows(path, encoding="utf-8-sig"):
+    """Read a downloaded CSV into a list of dict rows (header-keyed). utf-8-sig
+    strips a BOM if present. Keys are the CSV's own column headers (stripped)."""
+    with open(path, "r", encoding=encoding, newline="") as fh:
+        reader = csv.DictReader(fh)
+        rows = []
+        for raw in reader:
+            rows.append({(k or "").strip(): (v if v is not None else "")
+                         for k, v in raw.items()})
+        return rows
+
+
+def aggregate_pickups(rows, agent_key, nights_key, resid_key=None):
+    """Group booking rows by RAW agent name -> [{agent, roomNights, reservations}].
+
+    rows       : list of dict rows (already filtered to "entered yesterday").
+    agent_key  : column holding the agent name (kept verbatim, only stripped).
+    nights_key : column holding the room-nights for that row (summed per agent).
+    resid_key  : OPTIONAL column holding the reservation id. If given, `reservations`
+                 counts DISTINCT ids (rows are per room-night); if None, each row is
+                 one reservation (count = number of rows).
+
+    Sorted by roomNights desc, then agent asc, for a stable payload.
+    """
+    buckets = OrderedDict()  # agent -> {"roomNights": n, "resids": set(), "rows": n}
+    for r in rows:
+        agent = str(r.get(agent_key, "")).strip()
+        b = buckets.setdefault(agent, {"roomNights": 0, "resids": set(), "rows": 0})
+        b["roomNights"] += _to_number(r.get(nights_key), 0)
+        b["rows"] += 1
+        if resid_key:
+            rid = str(r.get(resid_key, "")).strip()
+            if rid:
+                b["resids"].add(rid)
+    out = []
+    for agent, b in buckets.items():
+        reservations = len(b["resids"]) if resid_key else b["rows"]
+        out.append({"agent": agent,
+                    "roomNights": b["roomNights"],
+                    "reservations": reservations})
+    out.sort(key=lambda e: (-e["roomNights"], e["agent"]))
+    return out
+
+
+def count_rooms_by_date(rows, date_key, dates, rooms_key=None):
+    """Rooms per date -> [{date, rooms}] for exactly the ISO `dates` given (in order).
+
+    rows      : list of dict rows (the arrivals/departures grid, any window that
+                covers `dates`).
+    date_key  : column holding the arrival/departure date for the row.
+    dates     : the ISO dates to report (e.g. prev_today_tomorrow()); every one is
+                present in the output even if zero.
+    rooms_key : OPTIONAL column holding a room count for the row. If None, each row
+                counts as one room (one row == one room arriving/departing).
+    """
+    totals = {d: 0 for d in dates}
+    for r in rows:
+        iso = to_iso(r.get(date_key))
+        if iso in totals:
+            totals[iso] += _to_number(r.get(rooms_key), 1) if rooms_key else 1
+    return [{"date": d, "rooms": totals[d]} for d in dates]
+
+
+def _envelope(property_code, snapshot_date=None, today=None):
+    return {
+        "property": property_code.upper(),
+        "snapshotDate": snapshot_date or (today or datetime.date.today()).isoformat(),
+    }
+
+
+def build_reservation_payload(property_code, pickups, arrivals,
+                              snapshot_date=None, today=None):
+    """{property, snapshotDate, pickups, arrivals} for POST /api/daily/reservation."""
+    body = _envelope(property_code, snapshot_date, today)
+    body["pickups"] = list(pickups or [])
+    body["arrivals"] = list(arrivals or [])
+    return body
+
+
+def build_departure_payload(property_code, departures, snapshot_date=None, today=None):
+    """{property, snapshotDate, departures} for POST /api/daily/departure."""
+    body = _envelope(property_code, snapshot_date, today)
+    body["departures"] = list(departures or [])
+    return body

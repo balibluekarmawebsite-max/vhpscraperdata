@@ -135,16 +135,12 @@ def _sub_today(fields, today=None):
     return {k: (iso if v == "{today}" else v) for k, v in (fields or {}).items()}
 
 
-def _post_file(path, url, token, data, require_ok, cfg):
-    """POST one CSV to one endpoint, with retries. Returns the result dict on
-    success or raises UploadError. Shared by the primary upload and every
-    extra_uploads target, so each endpoint gets the same backoff + 2xx handling."""
-    if not token:
-        raise UploadError(
-            "no dashboard token for {} — put it in import_token.txt in C:\\vhp-scraper "
-            "(or set the report's upload.token_file / token_env)".format(url))
-
-    headers = {"Authorization": "Bearer {}".format(token)}
+def _send_with_retries(do_request, url, require_ok, cfg):
+    """The shared POST core: run `do_request()` (which returns a requests.Response
+    or raises requests.RequestException), with the retry/backoff + 2xx/cold-start
+    handling every dashboard endpoint uses. Returns the result dict or raises
+    UploadError. `do_request` is a closure so the SAME loop serves a multipart file
+    POST (_post_file) and a JSON-body POST (post_json) identically."""
     backoffs = cfg.get("retry_backoffs", [2, 4, 8, 16])
     attempt = 0
     timings = []  # per-attempt "status in Ns" — shows fast-crash vs slow-timeout
@@ -161,14 +157,7 @@ def _post_file(path, url, token, data, require_ok, cfg):
         attempt += 1
         t0 = time.time()
         try:
-            with open(path, "rb") as fh:
-                resp = requests.post(
-                    url,
-                    headers=headers,
-                    data=data,
-                    files={"file": (os.path.basename(path), fh, "text/csv")},
-                    timeout=cfg.get("timeout", 180),
-                )
+            resp = do_request()
         except requests.RequestException as exc:  # network / client timeout
             timings.append("net-err {:.1f}s".format(time.time() - t0))
             if _retry_or_raise("network error ({})".format(exc)):
@@ -220,6 +209,57 @@ def _post_file(path, url, token, data, require_ok, cfg):
             "HTTP {} from dashboard ({}): {} [{}]".format(
                 status, url, detail, ", ".join(timings)),
             status=status)
+
+
+def _post_file(path, url, token, data, require_ok, cfg):
+    """POST one CSV to one endpoint, with retries. Returns the result dict on
+    success or raises UploadError. Shared by the primary upload and every
+    extra_uploads target, so each endpoint gets the same backoff + 2xx handling."""
+    if not token:
+        raise UploadError(
+            "no dashboard token for {} — put it in import_token.txt in C:\\vhp-scraper "
+            "(or set the report's upload.token_file / token_env)".format(url))
+
+    headers = {"Authorization": "Bearer {}".format(token)}
+
+    def _do():
+        with open(path, "rb") as fh:
+            return requests.post(
+                url,
+                headers=headers,
+                data=data,
+                files={"file": (os.path.basename(path), fh, "text/csv")},
+                timeout=cfg.get("timeout", 180),
+            )
+
+    return _send_with_retries(_do, url, require_ok, cfg)
+
+
+def post_json(payload, url, token, require_ok=False, cfg=None):
+    """POST a JSON body (a dict) to a dashboard endpoint, with the same retry /
+    backoff / 2xx handling as the CSV uploads. Used by the derived daily feeds
+    (/api/daily/reservation, /api/daily/departure) that send aggregated JSON
+    instead of a file. Returns the result dict or raises UploadError.
+
+    require_ok defaults to False because the /api/daily/* endpoints are idempotent
+    and may answer with a plain 2xx rather than the {"ok": true} import shape."""
+    if cfg is None:
+        cfg = config.UPLOAD
+    if not token:
+        raise UploadError(
+            "no dashboard token for {} — put it in import_token.txt in C:\\vhp-scraper "
+            "(or set the report's upload.token_file / token_env)".format(url))
+
+    headers = {
+        "Authorization": "Bearer {}".format(token),
+        "Content-Type": "application/json",
+    }
+
+    def _do():
+        return requests.post(url, headers=headers, json=payload,
+                             timeout=cfg.get("timeout", 180))
+
+    return _send_with_retries(_do, url, require_ok, cfg)
 
 
 def _error_detail(resp):

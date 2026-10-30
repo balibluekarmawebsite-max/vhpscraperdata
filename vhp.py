@@ -955,6 +955,54 @@ def _dump_date_diag(driver):
         return "(diag failed: {})".format(_describe(exc))
 
 
+def dump_tables(driver, max_rows=40, max_tables=6):
+    """Diagnostic: dump every visible data table/grid on the page as TSV (header +
+    up to `max_rows` rows each), so we can SEE the columns + sample data of a page
+    we haven't wired yet (e.g. the reservation grid's agent/room-nights columns, or
+    the room-departure list). Handles plain <table> and Quasar <div class="q-table">
+    grids (which use role=grid / .q-td rather than <td>). Never raises."""
+    js = r"""
+    var MAXR = arguments[0], MAXT = arguments[1];
+    function vis(e){ var r=e.getBoundingClientRect(); return r.width>1 && r.height>1; }
+    function cellText(c){ return (c.innerText||c.textContent||'').trim().replace(/\s+/g,' '); }
+    var out = [];
+    // 1) real <table>s
+    var tables = Array.prototype.slice.call(document.querySelectorAll('table')).filter(vis);
+    // 2) Quasar grids that aren't a <table> (role=grid / .q-table wrapper)
+    var grids = Array.prototype.slice.call(
+        document.querySelectorAll('[role=grid], .q-table__container')).filter(vis);
+    var all = tables.concat(grids).slice(0, MAXT);
+    if (!all.length) { return '(no visible tables/grids found)'; }
+    all.forEach(function(t, ti){
+      out.push('===== TABLE #' + (ti+1) + ' =====');
+      // header: <th>, or role=columnheader, or the first row's cells
+      var heads = Array.prototype.slice.call(
+          t.querySelectorAll('th, [role=columnheader]')).filter(vis).map(cellText);
+      if (heads.length) out.push('HEAD\t' + heads.join('\t'));
+      // rows: <tr> with <td>, or role=row with role=gridcell/.q-td
+      var rows = Array.prototype.slice.call(t.querySelectorAll('tr, [role=row]'));
+      var printed = 0, total = 0;
+      for (var i=0; i<rows.length; i++){
+        var r = rows[i];
+        var cells = Array.prototype.slice.call(
+            r.querySelectorAll('td, [role=gridcell], .q-td'));
+        if (!cells.length) continue;          // header row / spacer
+        total++;
+        if (printed < MAXR){
+          out.push(cells.map(cellText).join('\t'));
+          printed++;
+        }
+      }
+      out.push('(' + total + ' data row(s); showed ' + printed + ')');
+    });
+    return out.join('\n');
+    """
+    try:
+        return driver.execute_script(js, max_rows, max_tables)
+    except Exception as exc:  # noqa: BLE001
+        return "(table dump failed: {})".format(_describe(exc))
+
+
 def _looks_like_range(txt):
     """True if txt contains something like '12/10/26 - 12/10/26'."""
     return bool(re.search(r"\d{1,2}/\d{1,2}/\d{2,4}\s*-\s*\d{1,2}/\d{1,2}/\d{2,4}", txt or ""))

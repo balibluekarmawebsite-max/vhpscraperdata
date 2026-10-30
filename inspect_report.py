@@ -66,6 +66,9 @@ def main(argv):
     parser.add_argument("--code", default="bkds", help="which property window to use (default bkds)")
     parser.add_argument("--export", action="store_true",
                         help="also press SEARCH and save ONE sample CSV locally (NOT uploaded)")
+    parser.add_argument("--tables", action="store_true",
+                        help="also dump every visible table/grid (header + sample rows) — "
+                             "use for pages scraped as JSON (reservation / room-departure)")
     args = parser.parse_args(argv)
 
     if args.url:
@@ -116,6 +119,12 @@ def main(argv):
             print(driver.execute_script(_DUMP_CONTROLS_JS))
         except Exception as exc:  # noqa: BLE001
             print("controls dump failed: {}".format(exc))
+
+        if args.tables:
+            print("\n===== VISIBLE TABLES / GRIDS (header + sample rows) =====")
+            print(vhp.dump_tables(driver))
+            print("\nSend me this whole dump — I'll map the columns (agent / room-nights "
+                  "/ arrival / departure date) to the JSON the dashboard wants.")
 
         if args.export:
             print("\n===== SAMPLE CSV (press SEARCH + export; NOT uploaded) =====")
