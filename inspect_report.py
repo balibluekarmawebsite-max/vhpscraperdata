@@ -69,6 +69,9 @@ def main(argv):
     parser.add_argument("--tables", action="store_true",
                         help="also dump every visible table/grid (header + sample rows) — "
                              "use for pages scraped as JSON (reservation / room-departure)")
+    parser.add_argument("--search", action="store_true",
+                        help="press SEARCH (default filters) + wait for data BEFORE the table "
+                             "dump — needed for grids that are empty until searched")
     args = parser.parse_args(argv)
 
     if args.url:
@@ -97,9 +100,10 @@ def main(argv):
             prop["code"], prop["debug_port"], report["url"]))
         driver = make_driver_attached(prop["debug_port"], config.DOWNLOADS_DIR)
         vhp.ensure_logged_in(driver, prop, None, report["url"])
-        # Operational pages (reservation grid / room-departure) have no SEARCH
-        # button, so with --tables navigate gently instead of waiting for one.
-        vhp.open_report(driver, report, require_search=not args.tables)
+        # Most pages have a SEARCH button (wait for it). Only go gentle for a pure
+        # --tables discovery dump on a page that might have none.
+        gentle = args.tables and not args.search and not args.export
+        vhp.open_report(driver, report, require_search=not gentle)
         time.sleep(2.5)  # let the filter panel hydrate
 
         print("\n===== FIELD LABELS =====")
@@ -123,6 +127,15 @@ def main(argv):
             print("controls dump failed: {}".format(exc))
 
         if args.tables:
+            if args.search:
+                print("\n(pressing SEARCH with default filters to populate the grid...)")
+                try:
+                    vhp.configure_report(driver, report)   # no-op for an ad-hoc URL
+                    vhp.click_search(driver)
+                    vhp.wait_for_report_data(driver)
+                    time.sleep(1.5)
+                except Exception as exc:  # noqa: BLE001
+                    print("(search before table dump failed: {})".format(vhp._describe(exc)))
             print("\n===== VISIBLE TABLES / GRIDS (header + sample rows) =====")
             print(vhp.dump_tables(driver))
             print("\nSend me this whole dump — I'll map the columns (agent / room-nights "
