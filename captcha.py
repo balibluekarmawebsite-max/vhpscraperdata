@@ -127,31 +127,51 @@ def _pil_variants(img):
     return out
 
 
+def _cc_filter(bw):
+    """Drop line-like / tiny connected components from a white-on-black binary
+    (text = white). Removes residual strike-line fragments; keeps digit-height blobs."""
+    H, W = bw.shape
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
+    keep = np.zeros_like(bw)
+    for i in range(1, n):
+        _x, _y, ww, hh, area = stats[i]
+        if area < 25 or hh < H * 0.30:
+            continue  # tiny / too short -> noise or a line fragment
+        if ww > W * 0.55 and hh < H * 0.55:
+            continue  # wide + short -> a (near-)horizontal strike line
+        keep[labels == i] = 255
+    return keep
+
+
 def _cv2_variants(img):
-    """(name, image) preprocessings using OpenCV: Otsu threshold (both polarities),
-    then drop connected components that look like strike-through LINES (wide+short)
-    or noise (tiny / too short), keeping digit-height blobs. [] if cv2 is absent."""
+    """(name, image) OpenCV preprocessings tuned for VHP's CAPTCHA: white digits on
+    a blue box with THIN white strike-lines crossing the (thicker) digits.
+
+    Otsu-threshold to white text on black (tried both ways so whichever polarity the
+    digits are comes out right), then DE-LINE with a morphological OPENING / median
+    blur — opening erases the thin lines while the thicker digit strokes survive —
+    then connected-component clean-up. [] if cv2 is absent."""
     if not _CV2:
         return []
     out = []
     try:
-        arr = np.array(ImageOps.grayscale(img))
-        arr = cv2.resize(arr, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-        for inv in (False, True):
-            flag = cv2.THRESH_BINARY_INV if inv else cv2.THRESH_BINARY
-            _, bw = cv2.threshold(arr, 0, 255, flag + cv2.THRESH_OTSU)  # text=white
-            H, W = bw.shape
-            n, labels, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
-            keep = np.zeros_like(bw)
-            for i in range(1, n):
-                _x, _y, ww, hh, area = stats[i]
-                if area < 20 or hh < H * 0.30:
-                    continue  # tiny / too short -> line fragment or noise
-                if ww > W * 0.55 and hh < H * 0.55:
-                    continue  # wide + short -> a horizontal strike line
-                keep[labels == i] = 255
-            out.append(("cv2{}".format("-inv" if inv else ""),
-                        Image.fromarray(cv2.bitwise_not(keep))))  # dark text on light
+        gray = np.array(ImageOps.grayscale(img))
+        gray = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        k2 = np.ones((2, 2), np.uint8)
+        k3 = np.ones((3, 3), np.uint8)
+        # Try both threshold polarities so "text = white" holds whether the digits
+        # are brighter or darker than the box.
+        for pol, flag in (("a", cv2.THRESH_BINARY), ("b", cv2.THRESH_BINARY_INV)):
+            _, bw = cv2.threshold(gray, 0, 255, flag + cv2.THRESH_OTSU)
+            deline = {
+                "open2": cv2.morphologyEx(bw, cv2.MORPH_OPEN, k2),
+                "open3": cv2.morphologyEx(bw, cv2.MORPH_OPEN, k3),
+                "med3": cv2.medianBlur(bw, 3),
+            }
+            for vn, vb in deline.items():
+                cleaned = _cc_filter(vb)
+                out.append(("cv2-{}-{}".format(vn, pol),
+                            Image.fromarray(cv2.bitwise_not(cleaned))))  # dark on light
     except Exception:  # noqa: BLE001 - cv2 hiccup -> just skip these variants
         return out
     return out
