@@ -97,7 +97,9 @@ def main(argv):
             prop["code"], prop["debug_port"], report["url"]))
         driver = make_driver_attached(prop["debug_port"], config.DOWNLOADS_DIR)
         vhp.ensure_logged_in(driver, prop, None, report["url"])
-        vhp.open_report(driver, report)
+        # Operational pages (reservation grid / room-departure) have no SEARCH
+        # button, so with --tables navigate gently instead of waiting for one.
+        vhp.open_report(driver, report, require_search=not args.tables)
         time.sleep(2.5)  # let the filter panel hydrate
 
         print("\n===== FIELD LABELS =====")

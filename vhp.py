@@ -731,12 +731,18 @@ def refresh_page(driver, settle=3.0):
 # ---------------------------------------------------------------------------
 # per-report steps
 # ---------------------------------------------------------------------------
-def open_report(driver, report):
+def open_report(driver, report, require_search=True):
     """Deep-link to the report and wait for it to render.
 
     Detects login state at the REAL report page (not the /login route, which
     always shows a form): if the SEARCH button appears we're in; if a login
     field appears we were bounced to login -> raise LoginRequired.
+
+    require_search=False is for OPERATIONAL pages that have no SEARCH button
+    (e.g. the reservation grid /fr/reservation, room-departure
+    /to/telephone-operator): navigate, let the SPA hydrate, confirm we weren't
+    bounced to login, then return — instead of timing out waiting for a button
+    that never appears. Used by the inspector and the JSON-page scrape flow.
     """
     # Look first — if the window is already on a login page, DON'T navigate (that
     # would reload /login and wipe a CAPTCHA a human may be typing). Normally we get
@@ -750,6 +756,22 @@ def open_report(driver, report):
             "type the CAPTCHA and click LOG IN, then re-run.".format(report["name"]))
 
     _safe_get(driver, report["url"])  # recovers a crashed ('Aw, Snap!') tab
+
+    if not require_search:
+        # No SEARCH button to wait on. Give the SPA time to hydrate, then make sure
+        # we weren't bounced to login before handing the page to the caller.
+        time.sleep(4.0)
+        if _session_expired(driver):
+            dismiss_session_expired(driver)
+            raise LoginRequired(
+                "VHP session expired on {!r} — the window is now on the login page; "
+                "type the CAPTCHA and click LOG IN, then re-run.".format(report["name"]))
+        for sel in _LOGIN_FIELDS:
+            if any(e.is_displayed() for e in driver.find_elements(By.CSS_SELECTOR, sel)):
+                raise LoginRequired(
+                    "bounced to login on {!r}".format(report["name"]))
+        return
+
     end = time.time() + 40
     while time.time() < end:
         # Check the 'session expired' dialog FIRST — a stale report may still be
