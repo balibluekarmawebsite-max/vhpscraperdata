@@ -12,5 +12,9 @@ REM Output prints to the screen AND main.py writes a timestamped log under logs\
 REM ===========================================================================
 cd /d C:\vhp-scraper
 C:\Python38\python.exe main.py weekly
+REM Capture python's exit code BEFORE the echo (echo would reset ERRORLEVEL to 0,
+REM which made Task Scheduler always show "0 (OK)" even when the run failed).
+set RC=%ERRORLEVEL%
 echo.
-echo ----- finished (exit code %ERRORLEVEL%). Full log is under C:\vhp-scraper\logs\ -----
+echo ----- finished (exit code %RC%). Full log is under C:\vhp-scraper\logs\ -----
+exit /b %RC%

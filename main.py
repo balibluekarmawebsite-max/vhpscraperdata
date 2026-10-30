@@ -15,6 +15,7 @@ import argparse
 import datetime
 import logging
 import os
+import subprocess
 import sys
 
 import config
@@ -76,6 +77,23 @@ def send_alert(logger, text):
         requests.post(webhook, json={"text": text}, timeout=20)
     except Exception as exc:  # noqa: BLE001 - alerting must never crash the run
         logger.warning("alert failed: %s", exc)
+
+
+def desktop_alert(text):
+    """Pop a small, auto-dismissing Windows message so a FAILED run is noticed even
+    with no Slack webhook configured (the run this is called from had 0 successes).
+    Best-effort, Windows-only, never raises."""
+    if os.name != "nt":
+        return
+    try:
+        os.makedirs(config.LOGS_DIR, exist_ok=True)
+        vbs = os.path.join(config.LOGS_DIR, "_run_alert.vbs")
+        with open(vbs, "w") as fh:
+            fh.write('CreateObject("WScript.Shell").Popup "{}", 180, "VHP Scraper", 48'
+                     .format(text.replace('"', '""')))
+        subprocess.Popen(["wscript", vbs])  # non-blocking; auto-closes after 180s
+    except Exception:  # noqa: BLE001 - an alert must never break the run
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -202,8 +220,16 @@ def main(argv):
                 args.cadence, total_ok, total_fail
             ),
         )
-    # Non-zero exit if everything failed, so Task Scheduler can flag it.
-    return 1 if total_ok == 0 and total_fail > 0 else 0
+    # A COMPLETE failure (nothing uploaded) usually means the Chrome windows were
+    # closed/unreachable — pop a desktop warning so it isn't missed (no webhook
+    # needed), and exit non-zero so Task Scheduler flags the task red.
+    if total_ok == 0 and total_fail > 0:
+        desktop_alert("VHP {} run FAILED: 0 ok, {} failed. The 3 VHP Chrome windows "
+                      "are probably closed/logged out — open them (open-all.bat), "
+                      "log in, then re-run run-{}.bat.".format(
+                          args.cadence, total_fail, args.cadence))
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
