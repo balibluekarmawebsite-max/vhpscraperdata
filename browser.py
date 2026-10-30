@@ -187,28 +187,44 @@ def _port_open(port, timeout=1.0):
             pass
 
 
-def _kill_chrome_for_port(port):
-    """Kill ONLY the scraper's own Chrome for this debug port — a hung instance that
-    still holds the profile so a fresh launch can't open the port. Matches on
-    '--remote-debugging-port=<port>', which a normal/ personal Chrome never has, so
-    this can never close the user's own browsing. Best-effort, Windows-only."""
+def _kill_chrome_for_profile(profile):
+    """Kill ONLY chrome.exe processes using this property's --user-data-dir (a hung
+    scraper window still holding the profile lock / debug port, so a fresh launch
+    can't bind the port). We match on the unique PROFILE PATH, not the debug port:
+    the port 9222 is a common default other tools use, but C:\\vhp-scraper\\profiles
+    \\<code> is ours alone — so the user's personal Chrome, or a DevTools/Playwright
+    Chrome on the same port, is never a target. Best-effort, Windows-only."""
     if os.name != "nt":
         return
-    needle = "--remote-debugging-port={}".format(int(port))
+    needle = (profile or "").lower()
+    if not needle:
+        return
     try:
-        out = subprocess.check_output(
+        # wmic emits UTF-16LE (with a BOM) through a pipe, so capture RAW BYTES and
+        # decode as UTF-16 — decoding as locale text silently mangles every line and
+        # the kill would never match anything.
+        raw = subprocess.check_output(
             'wmic process where "name=\'chrome.exe\'" get ProcessId,CommandLine '
-            '/format:list', shell=True, stderr=subprocess.DEVNULL,
-            universal_newlines=True)
+            '/format:list', shell=True, stderr=subprocess.DEVNULL)
     except Exception:  # noqa: BLE001 - wmic missing/failed -> skip (just launch)
         return
+    text = raw.decode("utf-16-le", errors="ignore").lstrip("\ufeff")
+    if "CommandLine=" not in text:  # encoding/format drift -> try other decodings
+        for enc in ("utf-8", "latin-1"):
+            try:
+                alt = raw.decode(enc, errors="ignore")
+            except Exception:  # noqa: BLE001
+                continue
+            if "CommandLine=" in alt:
+                text = alt
+                break
     want = False  # /format:list prints CommandLine= then ProcessId= per process
-    for line in out.splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if line.startswith("CommandLine="):
-            # Exact-token match (not a substring) so port 9222 never matches a
-            # cmdline that uses e.g. 92220; the user's own Chrome has no such flag.
-            want = needle in line[len("CommandLine="):].split()
+            # Unique full profile path -> a plain case-insensitive substring is safe
+            # (it can't collide with an unrelated process).
+            want = needle in line[len("CommandLine="):].lower()
         elif line.startswith("ProcessId=") and want:
             pid = line[len("ProcessId="):].strip()
             if pid.isdigit():
@@ -220,10 +236,26 @@ def _kill_chrome_for_port(port):
             want = False
 
 
+# Windows process-creation flags for a fully-detached launch.
+_DETACHED_PROCESS = 0x00000008
+_CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+
 def launch_chrome(prop, logger=None):
-    """(Re)launch the property's Chrome window — detached, same flags as
-    open-<code>.bat, on the VHP login page. Returns True if the launch was issued
-    (the caller then waits for the port + attaches). Never raises."""
+    """(Re)launch the property's Chrome window — same flags as open-<code>.bat, on
+    the VHP login page. Returns True if the launch was issued (the caller then waits
+    for the port + attaches). Never raises. Windows-only.
+
+    We launch chrome.exe DIRECTLY (argv list) with CREATE_BREAKAWAY_FROM_JOB so the
+    window LEAVES the Task Scheduler job object and survives the scheduled run / the
+    keep-alive tick exiting. (A `cmd /c start` would leave Chrome inside that job,
+    and it could be torn down when the task ends — so reopened windows would never
+    persist, defeating the whole point.)"""
+    if os.name != "nt":
+        if logger:
+            logger.error("[%s] auto-reopen is Windows-only", prop.get("code"))
+        return False
     chrome = find_chrome()
     if not chrome:
         if logger:
@@ -234,51 +266,65 @@ def launch_chrome(prop, logger=None):
         os.makedirs(prop["profile"], exist_ok=True)
     except OSError:
         pass
-    flags = " ".join(getattr(config, "CHROME_LAUNCH_FLAGS", []) or [])
     url = prop.get("home_url") or "https://e1-vhp.com/login"
-    # cmd's START fully detaches the window so it survives this process exiting
-    # (exactly like open-<code>.bat). Quote the exe / profile / url for spaces.
-    cmd = ('start "" "{chrome}" --remote-debugging-port={port} '
-           '--user-data-dir="{profile}" {flags} "{url}"').format(
-        chrome=chrome, port=int(prop["debug_port"]), profile=prop["profile"],
-        flags=flags, url=url)
-    try:
-        subprocess.Popen(cmd, shell=True, close_fds=True)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        if logger:
-            logger.error("[%s] failed to launch Chrome: %s", prop.get("code"), exc)
-        return False
+    argv = [chrome,
+            "--remote-debugging-port={}".format(int(prop["debug_port"])),
+            "--user-data-dir={}".format(prop["profile"])]
+    argv += list(getattr(config, "CHROME_LAUNCH_FLAGS", []) or [])
+    argv.append(url)
+    # Prefer breaking out of the job; if the job forbids breakaway CreateProcess
+    # raises, so fall back to a plain detached launch.
+    for flags in (_DETACHED_PROCESS | _CREATE_BREAKAWAY_FROM_JOB | _CREATE_NEW_PROCESS_GROUP,
+                  _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP):
+        try:
+            subprocess.Popen(argv, creationflags=flags, close_fds=True)
+            return True
+        except OSError:
+            continue  # breakaway not permitted -> try the plain detached flags
+        except Exception as exc:  # noqa: BLE001
+            if logger:
+                logger.error("[%s] failed to launch Chrome: %s", prop.get("code"), exc)
+            return False
+    if logger:
+        logger.error("[%s] failed to launch Chrome (both detach modes refused)",
+                     prop.get("code"))
+    return False
 
 
 def ensure_window(prop, download_dir, logger=None, launch_wait=35):
-    """Attach to the property's Chrome window, RE-LAUNCHING it if it's closed.
+    """Attach to the property's Chrome window, RE-LAUNCHING it if it's genuinely
+    closed.
 
-    * If the window is open, attach and return the driver (the normal flow then
-      handles login, respecting the human-presence rules).
-    * If the window is CLOSED/unreachable, kill any hung Chrome still holding its
-      debug port, launch a fresh window (detached, on the login page), wait for the
-      port, attach, and — since the bot itself just opened it, so no human is on it
-      — try the opt-in auto-login once. Returns a driver that is logged in (if
-      auto-login succeeded) or sitting on the login page (for a human / the next
-      keep-alive tick).
+    * Window open -> attach and return the driver (the normal flow then handles
+      login, respecting the human-presence rules).
+    * Attach fails but the debug PORT is UP -> the window is alive and attach failed
+      for another reason (missing/mismatched chromedriver, a transient CDP race, a
+      human mid-login). DO NOT kill/relaunch a healthy window — re-raise so the
+      caller logs it, exactly as before this feature existed.
+    * Attach fails AND the port is DOWN (window closed/crashed) -> kill any hung
+      Chrome still holding this profile, launch a fresh window (detached, login
+      page), wait for the port, attach, and — the bot itself just opened it, so no
+      human is on it — try the opt-in auto-login once.
 
-    Raises WindowLaunchError if the window can't be brought up (chrome.exe missing,
-    or the port never comes up), so the caller logs it and moves on to the next
-    property."""
+    Raises WindowLaunchError if a closed window can't be brought up (not Windows,
+    chrome.exe missing, or the port never comes up)."""
     try:
         return make_driver_attached(prop["debug_port"], download_dir)
-    except Exception:  # noqa: BLE001 - window not open / not reachable -> re-launch
-        pass
+    except Exception as attach_exc:  # noqa: BLE001
+        # Self-heal ONLY when the window is really gone. If the port is up, the
+        # window is alive — never kill/relaunch it; surface the real error.
+        if _port_open(prop["debug_port"]):
+            raise
+        first_exc = attach_exc
 
     if logger:
         logger.warning("[%s] window on port %s is closed — auto-reopening it",
                         prop.get("code"), prop.get("debug_port"))
-    _kill_chrome_for_port(prop["debug_port"])
+    _kill_chrome_for_profile(prop["profile"])
     if not launch_chrome(prop, logger):
         raise WindowLaunchError(
-            "could not auto-reopen the {} window (chrome.exe not found?)".format(
-                prop.get("code")))
+            "could not auto-reopen the {} window (chrome.exe not found / not "
+            "Windows)".format(prop.get("code")))
 
     deadline = time.time() + launch_wait
     last = None
@@ -295,7 +341,7 @@ def ensure_window(prop, download_dir, logger=None, launch_wait=35):
     if driver is None:
         raise WindowLaunchError(
             "auto-reopened the {} window but its debug port {} never came up "
-            "({})".format(prop.get("code"), prop.get("debug_port"), last))
+            "({})".format(prop.get("code"), prop.get("debug_port"), last or first_exc))
 
     if logger:
         logger.info("[%s] window re-opened; attempting auto-login", prop.get("code"))
