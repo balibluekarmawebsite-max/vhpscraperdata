@@ -2085,9 +2085,10 @@ def _pick_field(hits):
 
 
 def _dropdown_field(driver, label):
-    """Find the single-select Quasar dropdown (q-select) whose label matches
-    `label` (e.g. 'Reservation Status'). Returns the clickable field or None."""
+    """Find the single-select Quasar dropdown (q-select) for `label`
+    (e.g. 'Reservation Status' / 'Display'). Returns the clickable field or None."""
     want = label.upper()
+    # 1) Floating-label controls: the label text is INSIDE the q-select/q-field.
     for cls in ("q-select", "q-field"):
         xp = ("//label[contains(@class,'{cls}')]"
               "[contains(translate(normalize-space(.),'{lo}','{up}'), {w!r})]"
@@ -2095,6 +2096,17 @@ def _dropdown_field(driver, label):
         hits = [e for e in driver.find_elements(By.XPATH, xp) if _disp_safe(e)]
         if hits:
             return _pick_field(hits)
+    # 2) EXTERNAL-label controls (the VHP operational pages — reservation grid,
+    #    telephone-operator): the label is a separate heading ABOVE the q-select, so
+    #    its text isn't inside the control. Find the leaf whose text IS the label,
+    #    then the first q-select that follows it in the document.
+    leaf = ("//*[not(*) and translate(normalize-space(.),'{lo}','{up}')={w!r}]"
+            ).format(lo=_LOWER, up=_UPPER, w=want)
+    xp2 = ("({leaf}/following::*[contains(concat(' ',normalize-space(@class),' '),"
+           "' q-select ')])[1]").format(leaf=leaf)
+    hits = [e for e in driver.find_elements(By.XPATH, xp2) if _disp_safe(e)]
+    if hits:
+        return hits[0]
     return None
 
 
@@ -2121,12 +2133,16 @@ def _dropdown_labels_diag(driver):
     """Print the dropdown field labels actually on the page — so when a label isn't
     found we can see what to target (same idea as the radio/segment diagnostics)."""
     try:
-        labels = driver.execute_script(
-            "var out=[];document.querySelectorAll("
-            "'label.q-select .q-field__label, label.q-field .q-field__label')"
-            ".forEach(function(e){var t=(e.textContent||'').trim();if(t)out.push(t);});"
+        info = driver.execute_script(
+            "var out=[];"
+            "document.querySelectorAll('label.q-select .q-field__label, "
+            "label.q-field .q-field__label').forEach(function(e){"
+            "var t=(e.textContent||'').trim();if(t)out.push('label:'+t);});"
+            "document.querySelectorAll('.q-select').forEach(function(e){"
+            "var t=(e.innerText||e.textContent||'').trim().replace(/\\s+/g,' ');"
+            "out.push('q-select=\"'+t.slice(0,32)+'\"');});"
             "return out.slice(0,40);")
-        print("    (config) dropdowns on page: {}".format(labels))
+        print("    (config) dropdowns on page: {}".format(info))
     except Exception:  # noqa: BLE001
         pass
 
@@ -2648,6 +2664,16 @@ def scrape_report(driver, prop, report, download_dir):
             "[set period] required date range not set/verified — skipping report "
             "to avoid wrong-period data")
     configure_report(driver, report)  # best-effort filter settings (non-fatal)
+    # Opt-in gate: for a report whose data depends on a dropdown (e.g. the daily
+    # reservation feed needs 'Reservation Status' = 'Expected Arrival' or it misses
+    # already-arrived guests), VERIFY each named dropdown actually stuck and SKIP
+    # rather than export the wrong view. Default off, so other reports are unchanged.
+    if report.get("require_dropdowns"):
+        for lbl, val in (report.get("dropdowns") or {}).items():
+            if not dropdown_shows(driver, lbl, val):
+                raise RuntimeError(
+                    "[dropdown] required {!r}={!r} not active — skipping report to "
+                    "avoid exporting the wrong view".format(lbl, val))
     step("click SEARCH", lambda: click_search(driver))
     step("wait for data", lambda: wait_for_report_data(driver))
     return export_and_download(driver, prop, report["name"], download_dir, step=step)

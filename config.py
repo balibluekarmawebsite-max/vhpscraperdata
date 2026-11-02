@@ -326,6 +326,12 @@ DAILY_JSON_REPORTS = [
         "url": "https://e1-vhp.com/fr/reservation",
         "period": {"from_days": -1, "to_days": 1},   # yesterday .. tomorrow
         "period_required": True,   # skip rather than send a wrong-window payload
+        # The default "Reservation" status hides guests who've ALREADY arrived
+        # (now In-House), so yesterday's arrivals read as 0. "Expected Arrival" is
+        # the arrivals view (by arrival date) across past/today/future. Gated so a
+        # failure to switch the view SKIPS rather than exporting the wrong one.
+        "dropdowns": {"Reservation Status": "Expected Arrival"},
+        "require_dropdowns": True,
         "section": "D",            # logging only — uses its own JSON endpoint
         "source": "vhp:reservation-daily",
         "upload": {
