@@ -19,6 +19,7 @@ import subprocess
 import sys
 
 import config
+import daily_reports
 from browser import ensure_window, kill_stale_chromedrivers
 from runlock import RunLock
 from uploader import UploadError, upload
@@ -99,13 +100,21 @@ def desktop_alert(text):
 # ---------------------------------------------------------------------------
 # Run one property
 # ---------------------------------------------------------------------------
-def run_property(logger, prop, reports):
-    """Returns (ok_count, fail_count) for this property."""
-    ok = fail = 0
+def run_property(logger, prop, reports, json_reports=()):
+    """Run this property's CSV reports (scrape -> /api/import etc.) and then its
+    derived JSON feeds (reservation + departure -> /api/daily/*). Returns
+    (ok_count, fail_count). Each report/feed is isolated; a dropped session stops
+    the rest and counts them as failed."""
+    ok = fail = attempted = 0
+    json_reports = list(json_reports)
+    total_due = len(reports) + len(json_reports)
+    probe = reports or json_reports
+    if not probe:
+        return 0, 0
 
     if prop["home_url"].startswith("PASTE-"):
         logger.error("[%s] home_url is still a placeholder — skipping", prop["code"])
-        return 0, len(reports)
+        return 0, total_due
 
     try:
         # Attach to the window — or auto-reopen it if it got closed (PC restart /
@@ -115,16 +124,18 @@ def run_property(logger, prop, reports):
         logger.error("[%s] cannot attach to or reopen its Chrome window on port %s "
                      "(open it with open-%s.bat): %s",
                      prop["code"], prop.get("debug_port"), prop["code"], exc)
-        return 0, len(reports)
+        return 0, total_due
 
+    session_dead = False
     try:
         try:
-            ensure_logged_in(driver, prop, None, reports[0]["url"])
+            ensure_logged_in(driver, prop, None, probe[0]["url"])
         except LoginRequired as exc:
             logger.error("[%s] %s", prop["code"], exc)
-            return 0, len(reports)
+            return 0, total_due
 
         for report in reports:
+            attempted += 1
             tag = "{}/{}".format(prop["code"], report["name"])
             try:
                 path = scrape_report(driver, prop, report, config.DOWNLOADS_DIR)
@@ -140,7 +151,7 @@ def run_property(logger, prop, reports):
             except LoginRequired:
                 logger.error("[%s] session dropped — log into its VHP window again",
                              prop["code"])
-                fail = len(reports) - ok  # this + remaining reports can't run
+                session_dead = True
                 break
             except UploadError as exc:
                 # Downloaded fine but the dashboard didn't accept the push.
@@ -157,8 +168,38 @@ def run_property(logger, prop, reports):
             except Exception as exc:  # noqa: BLE001 - isolate per-report failures
                 fail += 1
                 logger.exception("[%s] FAILED: %s", tag, exc)
+
+        # Derived JSON feeds (reservation arrivals+pickups, room departures). Same
+        # window/session; each POSTs its own aggregated JSON to /api/daily/*.
+        if not session_dead:
+            for jr in json_reports:
+                attempted += 1
+                tag = "{}/{}".format(prop["code"], jr["name"])
+                try:
+                    _payload, result = daily_reports.run(
+                        driver, prop, jr, config.DOWNLOADS_DIR,
+                        dry_run=False, logger=logger)
+                    logger.info("[%s] JSON feed posted -> %s (HTTP %s)",
+                                tag, (jr.get("upload") or {}).get("url"),
+                                result.get("_status"))
+                    ok += 1
+                except LoginRequired:
+                    logger.error("[%s] session dropped during JSON feeds — log in "
+                                 "again", prop["code"])
+                    session_dead = True
+                    break
+                except UploadError as exc:
+                    fail += 1
+                    logger.error("[%s] JSON feed built OK but POST FAILED: %s", tag, exc)
+                except Exception as exc:  # noqa: BLE001 - isolate per-feed failures
+                    fail += 1
+                    logger.exception("[%s] JSON feed FAILED: %s", tag, exc)
+
+        # Anything not reached (session died mid-run) counts as failed.
+        if attempted < total_due:
+            fail += total_due - attempted
     except Exception as exc:  # noqa: BLE001 - isolate per-property failures
-        fail += len(reports) - ok
+        fail += total_due - attempted
         logger.exception("[%s] property-level failure: %s", prop["code"], exc)
     # No driver.quit() — leave the user's VHP window open for the next run.
 
@@ -175,12 +216,15 @@ def main(argv):
 
     logger = setup_logging(args.cadence)
     reports = due_reports(args.cadence)
+    json_reports = [r for r in getattr(config, "DAILY_JSON_REPORTS", [])
+                    if args.cadence == "both"
+                    or r.get("cadence", "daily") in (args.cadence, "both")]
     logger.info(
-        "run start: cadence=%s, %d propert(ies), %d report(s) due",
-        args.cadence, len(config.PROPERTIES), len(reports),
+        "run start: cadence=%s, %d propert(ies), %d CSV + %d JSON report(s) due",
+        args.cadence, len(config.PROPERTIES), len(reports), len(json_reports),
     )
 
-    if not reports:
+    if not reports and not json_reports:
         logger.info("no reports due for cadence=%s — nothing to do", args.cadence)
         return 0
 
@@ -208,7 +252,7 @@ def main(argv):
         for prop in config.PROPERTIES:
             lock.refresh()  # keep the lock fresh across a long multi-report run
             logger.info("=== %s (%s) ===", prop["name"], prop["code"])
-            ok, fail = run_property(logger, prop, reports)
+            ok, fail = run_property(logger, prop, reports, json_reports)
             total_ok += ok
             total_fail += fail
     finally:
