@@ -170,26 +170,27 @@ def run_departure(driver, prop, report, download_dir, today=None,
     _log(logger, "    {} in-house row(s); depart {}={}, {}={}".format(
         len(exp_rows), t_iso, _rooms(exp_rows, t_iso), m_iso, _rooms(exp_rows, m_iso)))
 
-    # Yesterday: already-departed guests -> the 'Departed' view, whose date filter
-    # is a FROM-UNTIL range (not a single To Date). Set it to yesterday..yesterday.
-    # Best-effort: if it can't be read, yesterday stays 0 and today+tomorrow post.
-    y_rooms = 0
+    # Already-departed guests (checked out) -> the 'Departed' view, whose date
+    # filter is a FROM-UNTIL range (not a single To Date). Pull yesterday..today so
+    # we also catch guests who already checked out TODAY (they've left the
+    # Expected-Departure view). Best-effort: if it can't be read, we still post
+    # whatever Expected Departure gave. Today's total = either view (deduped by room).
+    dep_rows = []
     try:
-        _log(logger, "  room-departure {}: Departed range {}..{} (yesterday)".format(
-            prop["code"].upper(), y_iso, y_iso))
+        _log(logger, "  room-departure {}: Departed range {}..{} (already checked out)"
+             .format(prop["code"].upper(), y_iso, t_iso))
         dep_rows = _pull("Departed", "departed",
-                         period={"from_days": -1, "to_days": -1})
-        y_rooms = _rooms(dep_rows, y_iso)
+                         period={"from_days": -1, "to_days": 0})
         _log(logger, "    {} departed row(s); depart {}={}".format(
-            len(dep_rows), y_iso, y_rooms))
+            len(dep_rows), y_iso, _rooms(dep_rows, y_iso)))
     except Exception as exc:  # noqa: BLE001 - non-fatal; still post today+tomorrow
         _log(logger, "    (departed pull failed — yesterday may read 0): {}".format(
             vhp._describe(exc)))
 
     departures = [
-        {"date": y_iso, "rooms": y_rooms},
-        {"date": t_iso, "rooms": _rooms(exp_rows, t_iso)},
-        {"date": m_iso, "rooms": _rooms(exp_rows, m_iso)},
+        {"date": y_iso, "rooms": _rooms(dep_rows, y_iso)},               # departed
+        {"date": t_iso, "rooms": _rooms(exp_rows + dep_rows, t_iso)},    # either view
+        {"date": m_iso, "rooms": _rooms(exp_rows, m_iso)},               # in-house
     ]
     payload = dj.build_departure_payload(prop["code"], departures, today=today)
     _log(logger, "    departures: {}".format(departures))
