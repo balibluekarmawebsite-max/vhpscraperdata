@@ -365,7 +365,9 @@ DAILY_JSON_REPORTS = [
             "url": "https://dashboard.bluekarmasecrets.com/api/daily/departure",
             "require_ok": False,
         },
-        "dropdowns": {"Display": "Expected Departure"},
+        # The Display view is set PER-PULL by daily_reports (Expected Departure for
+        # today+tomorrow, Departed for yesterday), because the To Date picker only
+        # allows today/future, so yesterday's checkouts must come from 'Departed'.
         "to_date_label": "To Date",
         "columns": {
             "agent": "Reservation Name",

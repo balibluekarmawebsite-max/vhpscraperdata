@@ -105,53 +105,71 @@ def run_reservation(driver, prop, report, download_dir, today=None,
 
 def run_departure(driver, prop, report, download_dir, today=None,
                   dry_run=False, cfg=None, logger=None):
-    """Scrape /to/telephone-operator once per target date (To Date = D-1, filter
-    Depature == D), build + POST the departure JSON. Returns (payload, result)."""
+    """Build + POST the departure JSON for yesterday / today / tomorrow.
+
+    The telephone-operator 'To Date' picker only allows TODAY or later (past dates
+    are disabled), so 'Expected Departure, To Date = T' means in-house guests
+    expected to depart ON OR BEFORE T. Thus:
+      * today + tomorrow  -> 'Expected Departure', To Date = tomorrow, split by the
+        Departure column.
+      * yesterday          -> those guests have already checked out, so they are in
+        the 'Departed' view (best-effort; if it can't be read, yesterday reads 0).
+    """
     cfg = cfg or config.UPLOAD
     cols = report["columns"]
     base = today or datetime.date.today()
-    dates = dj.prev_today_tomorrow(today)   # [yesterday, today, tomorrow] ISO
+    y_iso, t_iso, m_iso = dj.prev_today_tomorrow(today)   # yesterday/today/tomorrow
     label = report.get("to_date_label", "To Date")
 
-    departures = []
-    for offset, d_iso in zip((-1, 0, 1), dates):
-        depart_day = base + datetime.timedelta(days=offset)
-        to_date = depart_day - datetime.timedelta(days=1)   # in-house as of D-1
-        _log(logger, "  room-departure {} {}: To Date={} -> rooms departing {}".format(
-            prop["code"].upper(), d_iso, to_date.strftime("%d/%m/%y"), d_iso))
-
-        vhp.open_report(driver, report)             # has a SEARCH button
+    def _pull(display_mode, to_date, suffix):
+        """One telephone-operator pull in a given Display view + To Date. Returns
+        the exported rows ([] if the grid is legitimately empty)."""
+        variant = dict(report)
+        variant["name"] = "{}-{}".format(report["name"], suffix)
+        variant["dropdowns"] = {"Display": display_mode}
+        vhp.open_report(driver, variant)
         vhp.dismiss_blocking_dialog(driver)
-        vhp.configure_report(driver, report)        # Display = Expected Departure
-        # GATE: the whole To-Date model ("in-house as of To Date") is only valid
-        # under the required view, so verify the dropdown actually stuck (rather
-        # than trusting configure_report, which is best-effort and swallows errors).
-        for lbl, val in (report.get("dropdowns") or {}).items():
-            if not vhp.dropdown_shows(driver, lbl, val):
-                raise RuntimeError(
-                    "[display] required dropdown {!r}={!r} not active — skipping "
-                    "room-departure to avoid a wrong count".format(lbl, val))
+        vhp.configure_report(driver, variant)
+        if not vhp.dropdown_shows(driver, "Display", display_mode):
+            raise RuntimeError("[display] {!r} not active".format(display_mode))
         if not vhp.set_single_date(driver, label, to_date):
-            raise RuntimeError(
-                "[to-date] could not set {!r} to {} — skipping room-departure to "
-                "avoid a wrong count".format(label, to_date.strftime("%d/%m/%y")))
+            raise RuntimeError("[to-date] could not set {!r} to {}".format(
+                label, to_date.strftime("%d/%m/%y")))
         vhp.click_search(driver)
-        # A legitimately empty in-house list (zero guests as of To Date) is a real
-        # 0, not a failure — don't let it abort the other two dates.
-        state = vhp.wait_for_report_ready(driver)
-        if state == "empty":
-            _log(logger, "    grid empty (no in-house guests as of {}) -> 0 rooms "
-                 "depart {}".format(to_date.strftime("%d/%m/%y"), d_iso))
-            departures.append({"date": d_iso, "rooms": 0})
-            continue
-        path = vhp.export_and_download(
-            driver, prop, "{}-{}".format(report["name"], d_iso), download_dir)
-        rows = dj.read_csv_rows(path)
-        rooms = dj.distinct_rooms_by_date(rows, cols["departure"], cols["room"], [d_iso])[0]["rooms"]
-        _log(logger, "    {} row(s) exported; {} room(s) depart {}".format(
-            len(rows), rooms, d_iso))
-        departures.append({"date": d_iso, "rooms": rooms})
+        if vhp.wait_for_report_ready(driver) == "empty":
+            return []
+        return dj.read_csv_rows(vhp.export_and_download(
+            driver, prop, variant["name"], download_dir))
 
+    def _rooms(rows, d_iso):
+        return dj.distinct_rooms_by_date(rows, cols["departure"], cols["room"],
+                                         [d_iso])[0]["rooms"]
+
+    tomorrow = base + datetime.timedelta(days=1)
+    _log(logger, "  room-departure {}: Expected Departure To Date={} (today+tomorrow)"
+         .format(prop["code"].upper(), tomorrow.strftime("%d/%m/%y")))
+    exp_rows = _pull("Expected Departure", tomorrow, "exp")
+    _log(logger, "    {} in-house row(s); depart {}={}, {}={}".format(
+        len(exp_rows), t_iso, _rooms(exp_rows, t_iso), m_iso, _rooms(exp_rows, m_iso)))
+
+    # Yesterday: already-departed guests -> the 'Departed' view (best-effort).
+    y_rooms = 0
+    try:
+        _log(logger, "  room-departure {}: Departed To Date={} (yesterday)".format(
+            prop["code"].upper(), base.strftime("%d/%m/%y")))
+        dep_rows = _pull("Departed", base, "departed")
+        y_rooms = _rooms(dep_rows, y_iso)
+        _log(logger, "    {} departed row(s); depart {}={}".format(
+            len(dep_rows), y_iso, y_rooms))
+    except Exception as exc:  # noqa: BLE001 - non-fatal; still post today+tomorrow
+        _log(logger, "    (departed pull failed — yesterday may read 0): {}".format(
+            vhp._describe(exc)))
+
+    departures = [
+        {"date": y_iso, "rooms": y_rooms},
+        {"date": t_iso, "rooms": _rooms(exp_rows, t_iso)},
+        {"date": m_iso, "rooms": _rooms(exp_rows, m_iso)},
+    ]
     payload = dj.build_departure_payload(prop["code"], departures, today=today)
     _log(logger, "    departures: {}".format(departures))
     res = _post(report, payload, cfg, dry_run, logger)
