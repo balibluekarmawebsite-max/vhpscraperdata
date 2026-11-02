@@ -1923,12 +1923,14 @@ def set_single_date(driver, label, date, settle=0.6):
         except Exception as exc:  # noqa: BLE001
             print("    (to-date) JS set failed: {}".format(_describe(exc)))
 
-        # 3) open the popup + click the calendar day
+        # 3) open the V-Calendar popup (the SAME proven opener the Arrival-Date
+        #    range uses — clicks the calendar icon/control, not just the readonly
+        #    input) and click the target day. _click_vc_day pages months, so a
+        #    To Date in the previous month (e.g. 31/10 while the picker opens on
+        #    November) is reached by navigating back.
+        popup_dump = ""
         try:
-            ins = _visible_inputs(field)
-            if ins:
-                ins[0].click()
-                time.sleep(0.6)
+            _popup, popup_dump = _open_and_capture_popup(driver, field)
             if _click_vc_day(driver, date):
                 time.sleep(settle)
                 _close_overlays(driver)
@@ -1941,6 +1943,7 @@ def set_single_date(driver, label, date, settle=0.6):
 
         print("    (to-date) WARNING could not set {!r} to {} (shows {}). Field HTML: {}"
               .format(label, want, _val() or "(blank)", _el_html(driver, field)))
+        print("    (to-date) popup HTML: {}".format(popup_dump or "(popup did not open)"))
         return False
     except Exception as exc:  # noqa: BLE001 - must never abort the scrape
         print("    (to-date) error: {}".format(_describe(exc)))
