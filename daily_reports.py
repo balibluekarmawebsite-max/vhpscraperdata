@@ -61,8 +61,13 @@ def run_reservation(driver, prop, report, download_dir, today=None,
     reservation JSON. Returns (payload, result)."""
     cfg = cfg or config.UPLOAD
     cols = report["columns"]
+    base = today or datetime.date.today()
     dates = dj.prev_today_tomorrow(today)   # [yesterday, today, tomorrow] ISO
     window = set(dates)
+    # Arrival RANGE = yesterday..tomorrow, as EXPLICIT dates anchored to `base` (not
+    # a from_days/to_days offset, which _period_range resolves against the system
+    # clock — that would disagree with `dates` when a `today` override is used).
+    arr_range = {"start": dates[0], "end": dates[-1]}
 
     def _pull(status_mode, suffix):
         """One reservation-grid pull in a given 'Reservation Status' view."""
@@ -70,6 +75,7 @@ def run_reservation(driver, prop, report, download_dir, today=None,
         variant["name"] = "{}-{}".format(report["name"], suffix)
         variant["dropdowns"] = {"Reservation Status": status_mode}
         variant["require_dropdowns"] = True    # skip rather than export wrong view
+        variant["period"] = arr_range
         rows = dj.read_csv_rows(vhp.scrape_report(driver, prop, variant, download_dir))
         _log(logger, "    [{}] {} row(s)".format(status_mode, len(rows)))
         return rows
@@ -179,8 +185,11 @@ def run_departure(driver, prop, report, download_dir, today=None,
     try:
         _log(logger, "  room-departure {}: Departed range {}..{} (already checked out)"
              .format(prop["code"].upper(), y_iso, t_iso))
+        # Explicit dates anchored to the same effective day (yesterday..today), NOT
+        # a from_days/to_days offset — _period_range resolves offsets against the
+        # system clock, which would disagree with y_iso/t_iso under a `today` override.
         dep_rows = _pull("Departed", "departed",
-                         period={"from_days": -1, "to_days": 0})
+                         period={"start": y_iso, "end": t_iso})
         _log(logger, "    {} departed row(s); depart {}={}".format(
             len(dep_rows), y_iso, _rooms(dep_rows, y_iso)))
     except Exception as exc:  # noqa: BLE001 - non-fatal; still post today+tomorrow
