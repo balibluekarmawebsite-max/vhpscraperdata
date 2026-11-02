@@ -24,6 +24,7 @@ dry_run=True scrapes + builds + returns the payload WITHOUT posting, so the
 numbers can be eyeballed before trusting the feed (run_daily_json.py --dry-run).
 """
 import datetime
+import time
 
 import config
 import daily_json as dj
@@ -135,6 +136,7 @@ def run_departure(driver, prop, report, download_dir, today=None,
         if not vhp.set_single_date(driver, label, to_date):
             raise RuntimeError("[to-date] could not set {!r} to {}".format(
                 label, to_date.strftime("%d/%m/%y")))
+        time.sleep(2.0)   # let the date-change re-render/auto-refresh settle
         vhp.click_search(driver)
         if vhp.wait_for_report_ready(driver) == "empty":
             return []
