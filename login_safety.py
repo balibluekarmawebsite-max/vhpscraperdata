@@ -99,31 +99,36 @@ def check_power():
     if os.name != "nt":
         _add("WARN", "PC never sleeps", "(not Windows — skipping powercfg)")
         return
-    # Query the 'Sleep after' setting; fall back to the whole Sleep subgroup, then
-    # the full scheme — Win7's alias support / output wording varies.
-    out = ""
-    for args in (["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"],
-                 ["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP"],
-                 ["powercfg", "/query"]):
-        out = _run(args)
-        if not out.startswith("__ERR__") and re.search(r"Setting Index:\s*0x", out):
-            break
-    # Looser match: any "... Setting Index: 0x...." line (covers 'Current AC/DC
-    # Power Setting Index' and minor wording differences).
-    idx = re.findall(r"Setting Index:\s*0x([0-9a-fA-F]+)", out)
-    if idx and all(int(v, 16) == 0 for v in idx):
-        _add("PASS", "PC never sleeps", "sleep timeout = Never")
-    elif idx:
-        secs = max(int(v, 16) for v in idx)
-        _add("FAIL", "PC never sleeps", "sleeps after ~{} min".format(secs // 60),
-             "run (Command Prompt):  powercfg /change standby-timeout-ac 0  "
-             "(also standby-timeout-dc 0) — sets Sleep = Never on the active plan")
-    else:
-        snippet = " ".join(out.split())[:200] if not out.startswith("__ERR__") else out
-        _add("WARN", "PC never sleeps",
-             "couldn't parse powercfg (you set it to Never earlier, so this is "
-             "likely fine). Raw: {}".format(snippet),
+    # Read ONLY the 'Sleep after' (STANDBYIDLE) setting. We query the whole Sleep
+    # subgroup and isolate that one setting's block, because scanning every index
+    # in the subgroup would wrongly pick up boolean settings (e.g. 'Allow wake
+    # timers' = 1) and report a fake tiny timeout.
+    out = _run(["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP"])
+    if out.startswith("__ERR__"):
+        _add("WARN", "PC never sleeps", "couldn't read powercfg",
              "verify Control Panel -> Power Options: 'Put the computer to sleep' = Never")
+        return
+    # Split into per-setting blocks; keep the 'Sleep after' one (by alias or GUID).
+    blocks = re.split(r"(?i)(?=Power Setting GUID:)", out)
+    sb = next((b for b in blocks if "standbyidle" in b.lower()
+               or "29f6c1db-86da-48c5-9fdb-f2b67b1f44da" in b.lower()), "")
+    idx = re.findall(r"Current (?:AC|DC) Power Setting Index:\s*0x([0-9a-fA-F]+)", sb)
+    if not idx:  # fall back to the specific-setting query
+        out2 = _run(["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"])
+        idx = re.findall(r"Current (?:AC|DC) Power Setting Index:\s*0x([0-9a-fA-F]+)", out2)
+    if not idx:
+        snippet = " ".join(out.split())[:200]
+        _add("WARN", "PC never sleeps",
+             "couldn't parse the Sleep-after value. Raw: {}".format(snippet),
+             "verify Control Panel -> Power Options: 'Put the computer to sleep' = Never")
+        return
+    secs = max(int(v, 16) for v in idx)
+    if secs == 0:
+        _add("PASS", "PC never sleeps", "sleep timeout = Never")
+    else:
+        amt = "{} sec".format(secs) if secs < 60 else "{} min".format(secs // 60)
+        _add("FAIL", "PC never sleeps", "sleeps after ~{}".format(amt),
+             "run:  C:\\Python38\\python.exe login_safety.py --fix  (as Administrator)")
 
 
 # --- 5: Windows Update won't auto-reboot ------------------------------------------
