@@ -116,7 +116,8 @@ def check_power():
     elif idx:
         secs = max(int(v, 16) for v in idx)
         _add("FAIL", "PC never sleeps", "sleeps after ~{} min".format(secs // 60),
-             "Control Panel -> Power Options: set 'Put the computer to sleep' = Never")
+             "run (Command Prompt):  powercfg /change standby-timeout-ac 0  "
+             "(also standby-timeout-dc 0) — sets Sleep = Never on the active plan")
     else:
         snippet = " ".join(out.split())[:200] if not out.startswith("__ERR__") else out
         _add("WARN", "PC never sleeps",
