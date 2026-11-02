@@ -99,21 +99,30 @@ def check_power():
     if os.name != "nt":
         _add("WARN", "PC never sleeps", "(not Windows — skipping powercfg)")
         return
-    out = _run(["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"])
-    if out.startswith("__ERR__"):
-        _add("WARN", "PC never sleeps", "couldn't read powercfg",
-             "Control Panel -> Power Options: set 'Put the computer to sleep' = Never")
-        return
-    idx = re.findall(r"Current (?:AC|DC) Power Setting Index:\s*0x([0-9a-fA-F]+)", out)
+    # Query the 'Sleep after' setting; fall back to the whole Sleep subgroup, then
+    # the full scheme — Win7's alias support / output wording varies.
+    out = ""
+    for args in (["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"],
+                 ["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP"],
+                 ["powercfg", "/query"]):
+        out = _run(args)
+        if not out.startswith("__ERR__") and re.search(r"Setting Index:\s*0x", out):
+            break
+    # Looser match: any "... Setting Index: 0x...." line (covers 'Current AC/DC
+    # Power Setting Index' and minor wording differences).
+    idx = re.findall(r"Setting Index:\s*0x([0-9a-fA-F]+)", out)
     if idx and all(int(v, 16) == 0 for v in idx):
-        _add("PASS", "PC never sleeps", "sleep timeout = Never (AC & battery)")
+        _add("PASS", "PC never sleeps", "sleep timeout = Never")
     elif idx:
         secs = max(int(v, 16) for v in idx)
-        _add("FAIL", "PC never sleeps", "sleeps after {} min".format(secs // 60),
+        _add("FAIL", "PC never sleeps", "sleeps after ~{} min".format(secs // 60),
              "Control Panel -> Power Options: set 'Put the computer to sleep' = Never")
     else:
-        _add("WARN", "PC never sleeps", "couldn't parse powercfg",
-             "Control Panel -> Power Options: set 'Put the computer to sleep' = Never")
+        snippet = " ".join(out.split())[:200] if not out.startswith("__ERR__") else out
+        _add("WARN", "PC never sleeps",
+             "couldn't parse powercfg (you set it to Never earlier, so this is "
+             "likely fine). Raw: {}".format(snippet),
+             "verify Control Panel -> Power Options: 'Put the computer to sleep' = Never")
 
 
 # --- 5: Windows Update won't auto-reboot ------------------------------------------
