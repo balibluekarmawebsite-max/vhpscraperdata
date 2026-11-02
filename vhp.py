@@ -1911,17 +1911,10 @@ def set_single_date(driver, label, date, settle=0.6):
                 return True
             break  # only the first editable input
 
-        # 2) JS value-set (for a readonly input Quasar still honours via events)
-        try:
-            ins = _visible_inputs(field)
-            if ins:
-                driver.execute_script(_JS_SET_INPUT, ins[0], want)
-                time.sleep(settle)
-                if _same_date(_val(), date):
-                    print("    (to-date) set {} via JS".format(want))
-                    return True
-        except Exception as exc:  # noqa: BLE001
-            print("    (to-date) JS set failed: {}".format(_describe(exc)))
+        # NOTE: no raw JS value-set here. On a readonly V-Calendar it only changes
+        # the <input> display text (not the component's real date model — a FALSE
+        # success) and the events it fires re-render the field (stale element). The
+        # calendar click below is the real path, exactly as the range setter does.
 
         # 3) open the V-Calendar popup (the SAME proven opener the Arrival-Date
         #    range uses — clicks the calendar icon/control, not just the readonly
@@ -1934,6 +1927,9 @@ def set_single_date(driver, label, date, settle=0.6):
             if _click_vc_day(driver, date):
                 time.sleep(settle)
                 _close_overlays(driver)
+                # Re-find the field before reading back — the calendar commit can
+                # re-render it, so the cached reference may be stale.
+                field = _qfield_by_label(driver, label) or field
                 if _same_date(_val(), date):
                     print("    (to-date) set {} via calendar".format(want))
                     return True
