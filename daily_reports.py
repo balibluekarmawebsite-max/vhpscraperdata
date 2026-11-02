@@ -122,10 +122,12 @@ def run_departure(driver, prop, report, download_dir, today=None,
     y_iso, t_iso, m_iso = dj.prev_today_tomorrow(today)   # yesterday/today/tomorrow
     label = report.get("to_date_label", "To Date")
 
-    def _pull(display_mode, to_date, suffix):
-        """One telephone-operator pull in a given Display view + To Date. Returns
-        the exported rows ([] if the grid is legitimately empty). Each step names
-        itself in any error, so a failure reads like '[search] ...'."""
+    def _pull(display_mode, suffix, to_date=None, period=None):
+        """One telephone-operator pull in a given Display view. The date filter
+        differs by view: 'Expected Departure' has a single 'To Date' (pass
+        to_date); 'Departed' has a 'From - Until' RANGE (pass period, set via
+        set_period). Returns the exported rows ([] if the grid is empty). Each step
+        names itself in any error, so a failure reads like '[search] ...'."""
         def step(name, fn):
             try:
                 return fn()
@@ -135,14 +137,21 @@ def run_departure(driver, prop, report, download_dir, today=None,
         variant = dict(report)
         variant["name"] = "{}-{}".format(report["name"], suffix)
         variant["dropdowns"] = {"Display": display_mode}
+        if period is not None:
+            variant["period"] = period
         step("open", lambda: vhp.open_report(driver, variant))
         vhp.dismiss_blocking_dialog(driver)
         step("configure", lambda: vhp.configure_report(driver, variant))
         if not vhp.dropdown_shows(driver, "Display", display_mode):
             raise RuntimeError("[display] {!r} not active".format(display_mode))
-        if not step("set to-date", lambda: vhp.set_single_date(driver, label, to_date)):
-            raise RuntimeError("[to-date] could not set {!r} to {}".format(
-                label, to_date.strftime("%d/%m/%y")))
+        if to_date is not None:
+            ok = step("set to-date", lambda: vhp.set_single_date(driver, label, to_date))
+            what = to_date.strftime("%d/%m/%y")
+        else:
+            ok = step("set range", lambda: vhp.set_period(driver, variant))
+            what = str(period)
+        if not ok:
+            raise RuntimeError("[date] could not set {}".format(what))
         time.sleep(2.0)   # let the date-change re-render/auto-refresh settle
         step("search", lambda: vhp.click_search(driver))
         if step("wait ready", lambda: vhp.wait_for_report_ready(driver)) == "empty":
@@ -157,16 +166,19 @@ def run_departure(driver, prop, report, download_dir, today=None,
     tomorrow = base + datetime.timedelta(days=1)
     _log(logger, "  room-departure {}: Expected Departure To Date={} (today+tomorrow)"
          .format(prop["code"].upper(), tomorrow.strftime("%d/%m/%y")))
-    exp_rows = _pull("Expected Departure", tomorrow, "exp")
+    exp_rows = _pull("Expected Departure", "exp", to_date=tomorrow)
     _log(logger, "    {} in-house row(s); depart {}={}, {}={}".format(
         len(exp_rows), t_iso, _rooms(exp_rows, t_iso), m_iso, _rooms(exp_rows, m_iso)))
 
-    # Yesterday: already-departed guests -> the 'Departed' view (best-effort).
+    # Yesterday: already-departed guests -> the 'Departed' view, whose date filter
+    # is a FROM-UNTIL range (not a single To Date). Set it to yesterday..yesterday.
+    # Best-effort: if it can't be read, yesterday stays 0 and today+tomorrow post.
     y_rooms = 0
     try:
-        _log(logger, "  room-departure {}: Departed To Date={} (yesterday)".format(
-            prop["code"].upper(), base.strftime("%d/%m/%y")))
-        dep_rows = _pull("Departed", base, "departed")
+        _log(logger, "  room-departure {}: Departed range {}..{} (yesterday)".format(
+            prop["code"].upper(), y_iso, y_iso))
+        dep_rows = _pull("Departed", "departed",
+                         period={"from_days": -1, "to_days": -1})
         y_rooms = _rooms(dep_rows, y_iso)
         _log(logger, "    {} departed row(s); depart {}={}".format(
             len(dep_rows), y_iso, y_rooms))
