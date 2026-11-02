@@ -1836,7 +1836,21 @@ def _qfield_by_label(driver, label):
                 cands.append(f)
         except Exception:  # noqa: BLE001 - stale element, keep looking
             continue
-    return cands[0] if cands else None
+    if cands:
+        return cands[0]
+    # EXTERNAL-label fallback (VHP operational pages, e.g. the room-departure
+    # 'To Date'): the label is a heading ABOVE the field, so there's no internal
+    # .q-field__label. Find the leaf whose text IS the label, then the q-field that
+    # follows it. (' q-field ' as a standalone class matches a real q-field/q-input,
+    # not a q-select, which only carries q-field-- modifier classes.)
+    up = label.strip().upper()
+    xp = ("(//*[not(*) and translate(normalize-space(.),'{lo}','{up}')={w!r}]"
+          "/following::*[contains(concat(' ',normalize-space(@class),' '),"
+          "' q-field ')])[1]").format(lo=_LOWER, up=_UPPER, w=up)
+    for f in driver.find_elements(By.XPATH, xp):
+        if _disp_safe(f):
+            return f
+    return None
 
 
 def _same_date(shown, date):

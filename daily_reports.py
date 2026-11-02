@@ -61,16 +61,40 @@ def run_reservation(driver, prop, report, download_dir, today=None,
     cfg = cfg or config.UPLOAD
     cols = report["columns"]
     dates = dj.prev_today_tomorrow(today)   # [yesterday, today, tomorrow] ISO
+    window = set(dates)
 
-    _log(logger, "  reservation-daily {}: arrivals {} (one pull, Arrival {}..{})".format(
+    def _pull(status_mode, suffix):
+        """One reservation-grid pull in a given 'Reservation Status' view."""
+        variant = dict(report)
+        variant["name"] = "{}-{}".format(report["name"], suffix)
+        variant["dropdowns"] = {"Reservation Status": status_mode}
+        variant["require_dropdowns"] = True    # skip rather than export wrong view
+        rows = dj.read_csv_rows(vhp.scrape_report(driver, prop, variant, download_dir))
+        _log(logger, "    [{}] {} row(s)".format(status_mode, len(rows)))
+        return rows
+
+    _log(logger, "  reservation-daily {}: arrivals {} (Arrival {}..{})".format(
         prop["code"].upper(), dates, dates[0], dates[-1]))
-    path = vhp.scrape_report(driver, prop, report, download_dir)
-    rows = dj.read_csv_rows(path)
-    _log(logger, "    exported {} row(s): {}".format(len(rows), path))
 
-    arrivals = dj.distinct_rooms_by_date(rows, cols["arrival"], cols["room"], dates)
+    # No single VHP view spans all three days: 'Reservation' shows NOT-yet-arrived
+    # (today + tomorrow), and once a guest arrives they drop into 'In House Guest'
+    # (so yesterday reads 0 under 'Reservation'). Pull both and merge.
+    rows = _pull("Reservation", "res")                         # today + tomorrow
+    try:
+        rows = rows + _pull("In House Guest", "inhouse")       # yesterday (arrived)
+    except Exception as exc:  # noqa: BLE001 - non-fatal; still post the rest
+        _log(logger, "    (in-house pull failed — yesterday may read 0): {}".format(
+            vhp._describe(exc)))
+
+    # The In-House pull also returns guests who arrived earlier, so keep only rows
+    # arriving within the 3-day window. distinct_rooms_by_date (room set) and
+    # aggregate_pickups_reservations (dedup by reservation+room) both de-duplicate,
+    # so a row that appears in both pulls is counted once.
+    in_window = [r for r in rows if dj.to_iso(r.get(cols["arrival"])) in window]
+
+    arrivals = dj.distinct_rooms_by_date(in_window, cols["arrival"], cols["room"], dates)
     pickups = dj.aggregate_pickups_reservations(
-        rows, cols["agent"], cols["rsvno"], cols["room"], cols["nights"])
+        in_window, cols["agent"], cols["rsvno"], cols["room"], cols["nights"])
     payload = dj.build_reservation_payload(prop["code"], pickups, arrivals, today=today)
 
     _log(logger, "    arrivals: {}".format(arrivals))
