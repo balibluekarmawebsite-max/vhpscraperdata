@@ -2400,12 +2400,27 @@ def click_search(driver):
         raise last
 
 
+def _count_cells_with_text(driver, need=3):
+    """Count Quasar table cells with non-empty text, tolerating cells that go STALE
+    while the grid is re-rendering (reading .text on a detached cell raises). Stops
+    once `need` is reached."""
+    n = 0
+    for c in driver.find_elements(By.CSS_SELECTOR, "table.q-table td"):
+        try:
+            if (c.text or "").strip():
+                n += 1
+                if n >= need:
+                    return n
+        except WebDriverException:  # cell detached mid-re-render -> skip it
+            continue
+    return n
+
+
 def wait_for_report_data(driver, timeout=60):
     """Wait until the Quasar table has real cells (data loaded via XHR)."""
     end = time.time() + timeout
     while time.time() < end:
-        cells = driver.find_elements(By.CSS_SELECTOR, "table.q-table td")
-        if sum(1 for c in cells if c.text.strip()) >= 3:
+        if _count_cells_with_text(driver) >= 3:
             return
         time.sleep(1)
     raise TimeoutError("report data did not load after SEARCH")
@@ -2426,8 +2441,7 @@ def wait_for_report_ready(driver, timeout=60, settle=4.0, min_wait=6.0):
     calm_since = None
     spin_sel = ".q-inner-loading, .q-spinner, .q-loading-bar, .q-loading"
     while time.time() < end:
-        cells = driver.find_elements(By.CSS_SELECTOR, "table.q-table td")
-        if sum(1 for c in cells if c.text.strip()) >= 3:
+        if _count_cells_with_text(driver) >= 3:
             return "data"
         spinning = any(_disp_safe(e) for e in driver.find_elements(By.CSS_SELECTOR, spin_sel))
         now = time.time()

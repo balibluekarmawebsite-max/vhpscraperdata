@@ -124,24 +124,31 @@ def run_departure(driver, prop, report, download_dir, today=None,
 
     def _pull(display_mode, to_date, suffix):
         """One telephone-operator pull in a given Display view + To Date. Returns
-        the exported rows ([] if the grid is legitimately empty)."""
+        the exported rows ([] if the grid is legitimately empty). Each step names
+        itself in any error, so a failure reads like '[search] ...'."""
+        def step(name, fn):
+            try:
+                return fn()
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError("[{}] {}".format(name, vhp._describe(exc)))
+
         variant = dict(report)
         variant["name"] = "{}-{}".format(report["name"], suffix)
         variant["dropdowns"] = {"Display": display_mode}
-        vhp.open_report(driver, variant)
+        step("open", lambda: vhp.open_report(driver, variant))
         vhp.dismiss_blocking_dialog(driver)
-        vhp.configure_report(driver, variant)
+        step("configure", lambda: vhp.configure_report(driver, variant))
         if not vhp.dropdown_shows(driver, "Display", display_mode):
             raise RuntimeError("[display] {!r} not active".format(display_mode))
-        if not vhp.set_single_date(driver, label, to_date):
+        if not step("set to-date", lambda: vhp.set_single_date(driver, label, to_date)):
             raise RuntimeError("[to-date] could not set {!r} to {}".format(
                 label, to_date.strftime("%d/%m/%y")))
         time.sleep(2.0)   # let the date-change re-render/auto-refresh settle
-        vhp.click_search(driver)
-        if vhp.wait_for_report_ready(driver) == "empty":
+        step("search", lambda: vhp.click_search(driver))
+        if step("wait ready", lambda: vhp.wait_for_report_ready(driver)) == "empty":
             return []
-        return dj.read_csv_rows(vhp.export_and_download(
-            driver, prop, variant["name"], download_dir))
+        return step("export", lambda: dj.read_csv_rows(vhp.export_and_download(
+            driver, prop, variant["name"], download_dir)))
 
     def _rooms(rows, d_iso):
         return dj.distinct_rooms_by_date(rows, cols["departure"], cols["room"],
