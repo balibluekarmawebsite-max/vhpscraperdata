@@ -2383,10 +2383,21 @@ def _find_option(driver, label):
 
 
 def click_search(driver):
-    btn = WebDriverWait(driver, 30).until(
-        EC.element_to_be_clickable((By.XPATH, SEARCH_BTN))
-    )
-    _safe_click(driver, btn)
+    """Find + click SEARCH, retrying on a transient/stale element — setting a date
+    or dropdown can re-render the toolbar between finding the button and clicking
+    it (StaleElementReferenceException), so re-find and retry."""
+    last = None
+    for _ in range(4):
+        try:
+            btn = WebDriverWait(driver, 30).until(
+                EC.element_to_be_clickable((By.XPATH, SEARCH_BTN)))
+            _safe_click(driver, btn)
+            return
+        except WebDriverException as exc:  # includes StaleElementReferenceException
+            last = exc
+            time.sleep(0.5)
+    if last is not None:
+        raise last
 
 
 def wait_for_report_data(driver, timeout=60):
