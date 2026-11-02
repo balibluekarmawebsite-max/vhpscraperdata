@@ -178,7 +178,33 @@ def check_startup():
              "reopen after a reboot")
 
 
-def main():
+def apply_fixes():
+    """--fix: set Sleep + Hibernate to Never on the active power plan (the only
+    auto-fixable check). Usually needs an ADMINISTRATOR Command Prompt."""
+    print("Applying fix: Sleep + Hibernate = Never (active power plan)\n")
+    denied = False
+    for c in (["powercfg", "/change", "standby-timeout-ac", "0"],
+              ["powercfg", "/change", "standby-timeout-dc", "0"],
+              ["powercfg", "/change", "hibernate-timeout-ac", "0"],
+              ["powercfg", "/change", "hibernate-timeout-dc", "0"]):
+        out = _run(c).strip()
+        if not out:  # powercfg /change is silent on success
+            print("  OK    {}".format(" ".join(c)))
+        else:
+            print("  FAIL  {}  -> {}".format(" ".join(c), out[:140]))
+            if "denied" in out.lower() or "elevat" in out.lower() or "administrator" in out.lower():
+                denied = True
+    if denied:
+        print("\n  >> 'Access denied'. Close this window, open Command Prompt as "
+              "ADMINISTRATOR\n     (Start -> type cmd -> right-click 'Command "
+              "Prompt' -> Run as administrator),\n     then run:  C:\\Python38\\"
+              "python.exe login_safety.py --fix")
+    print("\n" + "-" * 60 + "\n")
+
+
+def main(argv=None):
+    if argv and "--fix" in argv:
+        apply_fixes()
     print("VHP login-safety audit — {}\n".format(
         time.strftime("%Y-%m-%d %H:%M:%S")))
     for fn in (check_keepalive_log, check_keepalive_task, check_power,
@@ -210,4 +236,5 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import sys
+    raise SystemExit(main(sys.argv[1:]))
