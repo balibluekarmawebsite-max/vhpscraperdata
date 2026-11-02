@@ -72,6 +72,8 @@ def main(argv):
     parser.add_argument("--search", action="store_true",
                         help="press SEARCH (default filters) + wait for data BEFORE the table "
                              "dump — needed for grids that are empty until searched")
+    parser.add_argument("--display", help="set a 'Display' dropdown to this view "
+                                          "(e.g. 'Departed') before dumping controls")
     args = parser.parse_args(argv)
 
     if args.url:
@@ -105,6 +107,18 @@ def main(argv):
         gentle = args.tables and not args.search and not args.export
         vhp.open_report(driver, report, require_search=not gentle)
         time.sleep(2.5)  # let the filter panel hydrate
+
+        if args.display:
+            # Switch a 'Display' dropdown (telephone-operator) to a given view
+            # BEFORE dumping, so we can see that view's own filter controls
+            # (e.g. what date field the 'Departed' view shows).
+            try:
+                vhp._select_dropdown(driver, "Display", args.display)
+                time.sleep(1.5)
+                print("\n(set Display = {!r})".format(args.display))
+            except Exception as exc:  # noqa: BLE001
+                print("\n(could not set Display = {!r}: {})".format(
+                    args.display, vhp._describe(exc)))
 
         print("\n===== FIELD LABELS =====")
         print(", ".join(vhp._field_labels(driver)) or "(none)")
