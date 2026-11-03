@@ -229,6 +229,52 @@ def aggregate_pickups_reservations(rows, agent_key, rsvno_key, room_key, nights_
     return out
 
 
+def aggregate_pickups_by_creation(rows, agent_key, night_key, qty_key,
+                                  resid_key=None, status_key=None, exclude_statuses=()):
+    """pickups from 'Reservation By Creation Date' (bookings created on the target
+    day) -> [{agent, roomNights, reservations}].
+
+      roomNights   = sum of (Night × Room Quantity)
+      reservations = count of bookings
+    grouped by NORMALIZED agent (Reservation Name). Rows whose Reservation Status
+    matches `exclude_statuses` (e.g. Cancelled / No-show) are dropped first. If
+    `resid_key` is given, rows are de-duplicated per reservation (in case the page
+    lists one row per guest). Sorted by roomNights desc, then agent asc.
+    """
+    excl = {" ".join(s.strip().lower().split()) for s in exclude_statuses}
+
+    def _excluded(r):
+        if not status_key:
+            return False
+        st = " ".join(str(r.get(status_key, "")).strip().lower().split())
+        return st in excl
+
+    kept = [r for r in rows if not _excluded(r)]
+    if resid_key:
+        seen, dd = set(), []
+        for r in kept:
+            rid = str(r.get(resid_key, "")).strip()
+            if rid and rid in seen:
+                continue
+            if rid:
+                seen.add(rid)
+            dd.append(r)
+        kept = dd
+
+    buckets = OrderedDict()
+    for r in kept:
+        agent = normalize_agent(r.get(agent_key, ""))
+        b = buckets.setdefault(agent, {"roomNights": 0, "reservations": 0})
+        nights = _to_number(r.get(night_key), 0)
+        qty = _to_number(r.get(qty_key), 1) or 1
+        b["roomNights"] += nights * qty
+        b["reservations"] += 1
+    out = [{"agent": a, "roomNights": b["roomNights"], "reservations": b["reservations"]}
+           for a, b in buckets.items()]
+    out.sort(key=lambda e: (-e["roomNights"], e["agent"]))
+    return out
+
+
 def distinct_rooms_by_date(rows, date_key, room_key, dates):
     """Rooms per date counting DISTINCT room numbers (VHP repeats a room once per
     guest) -> [{date, rooms}] for exactly `dates`, in order, zero-filled."""

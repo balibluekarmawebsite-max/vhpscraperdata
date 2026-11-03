@@ -85,6 +85,43 @@ def main():
     check(by2[1] == {"date": "2026-10-30", "rooms": 7},
           "count_rooms_by_date: sums a rooms column (4+3=7)")
 
+    # --- pickups BY CREATION DATE (RN = Night x Qty, exclude Cancelled/No-show)
+    cre = [
+        {"Reservation Name": "BOOKING.COM  ", "Night": "3", "Room Quantity": "1",
+         "Reservation Number": "101", "Reservation Status": "Guaranteed"},
+        {"Reservation Name": "BOOKING.COM  ", "Night": "2", "Room Quantity": "2",
+         "Reservation Number": "102", "Reservation Status": "Guaranteed"},
+        {"Reservation Name": "G2 TRAVEL", "Night": "4", "Room Quantity": "1",
+         "Reservation Number": "103", "Reservation Status": "Guaranteed"},
+        {"Reservation Name": "Expedia", "Night": "5", "Room Quantity": "1",
+         "Reservation Number": "104", "Reservation Status": "Cancelled"},   # dropped
+        {"Reservation Name": "Expedia", "Night": "2", "Room Quantity": "1",
+         "Reservation Number": "105", "Reservation Status": "No Show"},      # dropped
+    ]
+    cp = dj.aggregate_pickups_by_creation(
+        cre, "Reservation Name", "Night", "Room Quantity",
+        resid_key="Reservation Number", status_key="Reservation Status",
+        exclude_statuses=["Cancelled", "No Show"])
+    # BOOKING.COM: 3x1 + 2x2 = 7 RN / 2 res ; G2 TRAVEL: 4 / 1 ; Expedia: dropped
+    check({"agent": "BOOKING.COM", "roomNights": 7, "reservations": 2} in cp,
+          "pickups-by-creation: BOOKING.COM 3x1+2x2 = 7 RN / 2 res")
+    check({"agent": "G2 TRAVEL", "roomNights": 4, "reservations": 1} in cp,
+          "pickups-by-creation: G2 TRAVEL 4 / 1")
+    check(all(e["agent"] != "Expedia" for e in cp),
+          "pickups-by-creation: Cancelled + No Show excluded (Expedia gone)")
+    check(cp[0]["agent"] == "BOOKING.COM", "pickups-by-creation: sorted by RN desc")
+    # de-dup per reservation when the page lists one row per guest
+    gdup = [
+        {"Reservation Name": "ALARIC", "Night": "2", "Room Quantity": "1",
+         "Reservation Number": "201", "Reservation Status": "Guaranteed"},
+        {"Reservation Name": "ALARIC", "Night": "2", "Room Quantity": "1",
+         "Reservation Number": "201", "Reservation Status": "Guaranteed"},  # same booking
+    ]
+    cp2 = dj.aggregate_pickups_by_creation(gdup, "Reservation Name", "Night",
+                                           "Room Quantity", resid_key="Reservation Number")
+    check(cp2 == [{"agent": "ALARIC", "roomNights": 2, "reservations": 1}],
+          "pickups-by-creation: guest rows de-duped per reservation (2 RN / 1 res)")
+
     # --- agent name normalization -------------------------------------------
     check(dj.normalize_agent("BOOKING.COM  ") == "BOOKING.COM", "normalize: trailing spaces")
     check(dj.normalize_agent("G2 TRAVEL, ") == "G2 TRAVEL", "normalize: trailing comma")

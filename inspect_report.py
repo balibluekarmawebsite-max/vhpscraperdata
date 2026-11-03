@@ -74,6 +74,9 @@ def main(argv):
                              "dump — needed for grids that are empty until searched")
     parser.add_argument("--display", help="set a 'Display' dropdown to this view "
                                           "(e.g. 'Departed') before dumping controls")
+    parser.add_argument("--segments", action="store_true",
+                        help="dump ALL 'Segment Code' option labels (to tune "
+                             "segment_untick to the exact VHP names)")
     args = parser.parse_args(argv)
 
     if args.url:
@@ -119,6 +122,13 @@ def main(argv):
             except Exception as exc:  # noqa: BLE001
                 print("\n(could not set Display = {!r}: {})".format(
                     args.display, vhp._describe(exc)))
+
+        if args.segments:
+            print("\n===== SEGMENT CODE OPTIONS (exact labels) =====")
+            for s in vhp.dump_segment_options(driver):
+                print("  | {}".format(s))
+            print("Send me this list — I'll set segment_untick to match the real "
+                  "Compliment / House Use labels.")
 
         print("\n===== FIELD LABELS =====")
         print(", ".join(vhp._field_labels(driver)) or "(none)")

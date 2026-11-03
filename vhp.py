@@ -2333,6 +2333,51 @@ _SCROLL_MENU_JS = (
 )
 
 
+def dump_segment_options(driver):
+    """Open the Segment Code multi-select and return ALL its option labels (scrolling
+    the virtual list), so segment_untick can be tuned to the EXACT VHP labels.
+    Never raises; returns a list of strings."""
+    try:
+        field = next((el for el in driver.find_elements(
+            By.CSS_SELECTOR, "[data-cy='{}']".format(_SEGMENT_CY)) if _disp_safe(el)), None)
+        if field is None:
+            return ["(Segment Code control [data-cy={}] not found on this page)".format(_SEGMENT_CY)]
+        _safe_click(driver, field)
+        for _ in range(15):
+            if driver.find_elements(By.CSS_SELECTOR, ".q-menu .q-item"):
+                break
+            time.sleep(0.2)
+        js = ("var out=[];document.querySelectorAll('.q-menu .q-item__label').forEach("
+              "function(e){var t=(e.textContent||'').trim();if(t)out.push(t);});return out;")
+        seen = []
+        try:
+            driver.execute_script(_SCROLL_MENU_JS, 0, True)  # top
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.2)
+        last, stalls = -1.0, 0
+        for _ in range(150):
+            for lbl in (driver.execute_script(js) or []):
+                if lbl not in seen:
+                    seen.append(lbl)
+            try:
+                pos = float(driver.execute_script(_SCROLL_MENU_JS, 240, False))
+            except Exception:  # noqa: BLE001
+                break
+            if pos <= last:
+                stalls += 1
+                if stalls >= 3:
+                    break
+            else:
+                stalls = 0
+            last = pos
+            time.sleep(0.12)
+        _close_overlays(driver)
+        return seen or ["(menu opened but no option labels found)"]
+    except Exception as exc:  # noqa: BLE001
+        return ["(error: {})".format(_describe(exc))]
+
+
 def _find_option(driver, label):
     """Find a dropdown option whose q-item label EXACTLY equals `label`,
     sweeping the open menu's real scrollable list (virtual scroll) top-to-bottom.
