@@ -137,13 +137,17 @@ def main():
     # --- payload envelopes ---------------------------------------------------
     rp = dj.build_reservation_payload("bkv", pk, by, today=ref)
     check(rp["property"] == "BKV", "reservation payload: property upper-cased")
-    check(rp["snapshotDate"] == "2026-10-30", "reservation payload: snapshotDate = today ISO")
+    check("snapshotDate" not in rp,
+          "reservation payload: snapshotDate OMITTED (dashboard defaults to yesterday)")
     check(rp["pickups"] == pk and rp["arrivals"] == by,
           "reservation payload: carries pickups + arrivals")
 
     dp = dj.build_departure_payload("BKDS", by2, snapshot_date="2026-10-25")
     check(dp["property"] == "BKDS", "departure payload: property")
-    check(dp["snapshotDate"] == "2026-10-25", "departure payload: explicit snapshotDate honored")
+    check(dp["snapshotDate"] == "2026-10-25",
+          "departure payload: EXPLICIT snapshotDate (backfill) honored")
+    check("snapshotDate" not in dj.build_departure_payload("BKV", by2),
+          "departure payload: snapshotDate omitted when not given")
     check(dp["departures"] == by2, "departure payload: carries departures")
 
     # --- read_csv_rows: VHP's blank-line + empty-row preamble before the header --

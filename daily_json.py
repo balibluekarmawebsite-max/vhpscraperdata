@@ -242,24 +242,30 @@ def distinct_rooms_by_date(rows, date_key, room_key, dates):
     return [{"date": d, "rooms": len(sets[d])} for d in dates]
 
 
-def _envelope(property_code, snapshot_date=None, today=None):
-    return {
-        "property": property_code.upper(),
-        "snapshotDate": snapshot_date or (today or datetime.date.today()).isoformat(),
-    }
+def _envelope(property_code, snapshot_date=None):
+    """Envelope for a daily feed. snapshotDate is OMITTED unless explicitly given:
+    the dashboard defaults an absent snapshotDate to YESTERDAY (WITA), which is what
+    we want. (Sending today's run date was wrong.) Pass snapshot_date only for a
+    backfill of a specific day."""
+    env = {"property": property_code.upper()}
+    if snapshot_date:
+        env["snapshotDate"] = snapshot_date
+    return env
 
 
 def build_reservation_payload(property_code, pickups, arrivals,
                               snapshot_date=None, today=None):
-    """{property, snapshotDate, pickups, arrivals} for POST /api/daily/reservation."""
-    body = _envelope(property_code, snapshot_date, today)
+    """{property, [snapshotDate], pickups, arrivals} for POST /api/daily/reservation.
+    `today` is kept for signature compatibility but no longer stamps snapshotDate."""
+    body = _envelope(property_code, snapshot_date)
     body["pickups"] = list(pickups or [])
     body["arrivals"] = list(arrivals or [])
     return body
 
 
 def build_departure_payload(property_code, departures, snapshot_date=None, today=None):
-    """{property, snapshotDate, departures} for POST /api/daily/departure."""
-    body = _envelope(property_code, snapshot_date, today)
+    """{property, [snapshotDate], departures} for POST /api/daily/departure.
+    `today` kept for signature compatibility; snapshotDate is omitted by default."""
+    body = _envelope(property_code, snapshot_date)
     body["departures"] = list(departures or [])
     return body

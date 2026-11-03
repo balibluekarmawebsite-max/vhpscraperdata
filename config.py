@@ -204,7 +204,8 @@ REPORTS = [
         "extra_uploads": [
             {
                 "url": "https://dashboard.bluekarmasecrets.com/api/daily/pickup",
-                "extra_fields": {"snapshotDate": "{today}"},
+                # No snapshotDate: the dashboard defaults an absent snapshotDate to
+                # YESTERDAY (WITA), which is what it wants — not today's run date.
                 "require_ok": False,   # idempotent daily snapshot; accept any 2xx
             },
         ],
@@ -294,7 +295,7 @@ REPORTS = [
         # Same bearer token as /api/import.
         "upload": {
             "url": "https://dashboard.bluekarmasecrets.com/api/daily/pickup",
-            "extra_fields": {"snapshotDate": "{today}"},
+            # No snapshotDate — the dashboard defaults an absent one to YESTERDAY.
             "require_ok": False,   # idempotent daily snapshot; accept any 2xx
         },
         # Month selector = THIS month, current year (dynamic). Run in Oct 2026 ->
