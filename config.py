@@ -340,13 +340,29 @@ DAILY_JSON_REPORTS = [
             #   "token_file": "reservation_token.txt",  (git-ignored) or
             #   "token_env": "RESERVATION_API_TOKEN".
         },
-        "columns": {
+        "columns": {   # /fr/reservation columns, used for ARRIVALS (distinct rooms)
             "agent": "Reservation Name",
             "rsvno": "Rsv No",
             "room": "Room Number",
             "arrival": "Arrival",
             "departure": "Departure",
             "nights": "Nights",
+        },
+        # PICKUPS come from a DIFFERENT page: 'Reservation By Creation Date',
+        # filtered to bookings CREATED yesterday, grouped by agent, RN = Night ×
+        # Room Quantity, excluding Cancelled / No-show (per dashboard §13). The
+        # /fr/reservation arrival view can't give this (a booking created yesterday
+        # can arrive any future date).
+        "pickups_source": {
+            "url": "https://e1-vhp.com/fr/reservation-by-creation-date",
+            "columns": {
+                "agent": "Reservation Name",
+                "night": "Night",
+                "qty": "Room Quantity",
+                "resid": "Reservation Number",
+                "status": "Status",
+            },
+            "exclude_statuses": ["cancel", "no show", "no-show"],
         },
     },
     {

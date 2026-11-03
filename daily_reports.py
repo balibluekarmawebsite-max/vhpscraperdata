@@ -11,9 +11,12 @@ reads the exported CSV, aggregates it with daily_json, and POSTs the JSON with
 uploader.post_json. Config (URL, endpoint, column names, date window) lives in
 config.DAILY_JSON_REPORTS; the aggregation is in daily_json (unit-tested).
 
-Reservation: ONE pull with Arrival Date = yesterday..tomorrow, then split by the
-Arrival column into the three dates (arrivals = distinct rooms/date) and grouped
-by agent (pickups).
+Reservation: ARRIVALS come from /fr/reservation (two pulls, Reservation + In House
+Guest, merged) with Arrival Date = yesterday..tomorrow, split by the Arrival column
+(arrivals = distinct rooms/date). PICKUPS come from a SEPARATE page, 'Reservation
+By Creation Date', filtered to bookings CREATED yesterday, grouped by Reservation
+Name, RN = Night × Room Quantity, excluding Cancelled / No-show (a booking created
+yesterday can arrive any future date, so the arrival view can't produce pickups).
 
 Departure: the Expected-Departure view is anchored on a single "To Date" that
 lists guests in-house AS OF that date (Arrival <= ToDate, Departure > ToDate), so
@@ -55,6 +58,40 @@ def _pretty(payload):
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
+def _reservation_pickups(driver, prop, report, download_dir, base, logger):
+    """PICKUPS for the reservation feed, from a DIFFERENT page than arrivals:
+    'Reservation By Creation Date' filtered to bookings CREATED yesterday,
+    grouped by Reservation Name, RN = Night × Room Quantity, excluding Cancelled /
+    No-show (dashboard §13). A booking created yesterday can arrive on any future
+    date, so the arrival view can't produce this — it needs its own pull.
+
+    Best-effort: a failed pull logs and returns [] (empty pickups) rather than
+    aborting the whole reservation feed, so arrivals still post.
+    """
+    src = report.get("pickups_source")
+    if not src:
+        return []
+    y_iso = (base - datetime.timedelta(days=1)).isoformat()   # created yesterday
+    variant = dict(src)
+    variant["name"] = "{}-pickups".format(report["name"])
+    variant["period"] = {"start": y_iso, "end": y_iso}
+    variant["period_required"] = True   # skip rather than export an unfiltered page
+    try:
+        rows = dj.read_csv_rows(vhp.scrape_report(driver, prop, variant, download_dir))
+    except Exception as exc:  # noqa: BLE001 - non-fatal; post arrivals with empty pickups
+        _log(logger, "    (pickups pull failed — sending empty pickups): {}".format(
+            vhp._describe(exc)))
+        return []
+    c = src["columns"]
+    pickups = dj.aggregate_pickups_by_creation(
+        rows, c["agent"], c["night"], c["qty"],
+        resid_key=c.get("resid"), status_key=c.get("status"),
+        exclude_statuses=src.get("exclude_statuses", ()))
+    _log(logger, "    pickups source (created {}): {} row(s) -> {} agent(s)".format(
+        y_iso, len(rows), len(pickups)))
+    return pickups
+
+
 def run_reservation(driver, prop, report, download_dir, today=None,
                     dry_run=False, cfg=None, logger=None):
     """Scrape /fr/reservation for the 3-day arrival window, build + POST the
@@ -94,15 +131,16 @@ def run_reservation(driver, prop, report, download_dir, today=None,
             vhp._describe(exc)))
 
     # The In-House pull also returns guests who arrived earlier, so keep only rows
-    # arriving within the 3-day window. distinct_rooms_by_date (room set) and
-    # aggregate_pickups_reservations (dedup by reservation+room) both de-duplicate,
-    # so a row that appears in both pulls is counted once.
+    # arriving within the 3-day window. distinct_rooms_by_date works on a room SET
+    # per date, so a room that appears in both pulls is counted once.
     in_window = [r for r in rows if dj.to_iso(r.get(cols["arrival"])) in window]
 
     arrivals = dj.distinct_rooms_by_date(in_window, cols["arrival"], cols["room"], dates)
-    pickups = dj.aggregate_pickups_reservations(
-        in_window, cols["agent"], cols["rsvno"], cols["room"], cols["nights"])
-    payload = dj.build_reservation_payload(prop["code"], pickups, arrivals, today=today)
+
+    # PICKUPS come from their own page ('Reservation By Creation Date', bookings
+    # created yesterday) — NOT from these arrival rows, which group by arrival date.
+    pickups = _reservation_pickups(driver, prop, report, download_dir, base, logger)
+    payload = dj.build_reservation_payload(prop["code"], pickups, arrivals)
 
     _log(logger, "    arrivals: {}".format(arrivals))
     _log(logger, "    pickups: {} agent(s)".format(len(pickups)))

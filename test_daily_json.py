@@ -94,14 +94,16 @@ def main():
         {"Reservation Name": "G2 TRAVEL", "Night": "4", "Room Quantity": "1",
          "Reservation Number": "103", "Reservation Status": "Guaranteed"},
         {"Reservation Name": "Expedia", "Night": "5", "Room Quantity": "1",
-         "Reservation Number": "104", "Reservation Status": "Cancelled"},   # dropped
+         "Reservation Number": "104", "Reservation Status": "Cancelled by BookEngine"},
         {"Reservation Name": "Expedia", "Night": "2", "Room Quantity": "1",
-         "Reservation Number": "105", "Reservation Status": "No Show"},      # dropped
+         "Reservation Number": "105", "Reservation Status": "No-Show"},
+        {"Reservation Name": "", "Night": "NIGHT: 12", "Room Quantity": "",
+         "Reservation Number": "", "Reservation Status": ""},   # TOTAL row -> skipped
     ]
     cp = dj.aggregate_pickups_by_creation(
         cre, "Reservation Name", "Night", "Room Quantity",
         resid_key="Reservation Number", status_key="Reservation Status",
-        exclude_statuses=["Cancelled", "No Show"])
+        exclude_statuses=["cancel", "no show"])
     # BOOKING.COM: 3x1 + 2x2 = 7 RN / 2 res ; G2 TRAVEL: 4 / 1 ; Expedia: dropped
     check({"agent": "BOOKING.COM", "roomNights": 7, "reservations": 2} in cp,
           "pickups-by-creation: BOOKING.COM 3x1+2x2 = 7 RN / 2 res")
@@ -223,6 +225,32 @@ def main():
               "read_csv_rows+arrivals: 1 distinct room each on 29/30/31")
     finally:
         os.remove(p)
+
+    # read_csv_rows also handles the 'Reservation By Creation Date' TITLE preamble
+    # (hotel name / address / period lines before a wide header).
+    cre_text = (
+        "BALI BLUE KARMA\n"
+        "Jl. Address,,,,,,,,,,,,Date: 03/11/2026\n"
+        "\n"
+        "Tel +62,,,,Period: 02/11/26 - 02/11/26\n"
+        "Reservation By Creation Date\n"
+        "\n"
+        '"No","Created Date","Reservation Number","Reservation Name","Night","Room Quantity","Status"\n'
+        '"1","2026-11-02","24099","EXPEDIA  ","5","1","Guaranted"\n'
+        '"2","2026-11-02","24100","ALARIC","4","1","Guaranted"\n'
+        "\n"
+    )
+    fd2, p2 = tempfile.mkstemp(suffix=".csv")
+    os.close(fd2)
+    with open(p2, "w", encoding="utf-8-sig", newline="") as fh:
+        fh.write(cre_text)
+    try:
+        crows = dj.read_csv_rows(p2)
+        check(len(crows) == 2, "read_csv_rows: skips the TITLE preamble -> 2 data rows")
+        check(crows[0].get("Reservation Name") == "EXPEDIA  " and crows[0].get("Night") == "5",
+              "read_csv_rows: creation-date header mapped past the title lines")
+    finally:
+        os.remove(p2)
 
     passed = sum(results)
     print("\n{}/{} checks passed".format(passed, len(results)))

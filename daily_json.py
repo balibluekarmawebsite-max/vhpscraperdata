@@ -24,6 +24,7 @@ pages are passed in by the caller (config), so once we've seen a sample export
 we pin them in config.REPORTS without touching this logic.
 """
 import csv
+import re
 import datetime
 from collections import OrderedDict
 
@@ -106,16 +107,23 @@ def _read_text(path):
 def read_csv_rows(path):
     """Read a downloaded VHP CSV into a list of dict rows (header-keyed).
 
-    VHP's export starts with a blank line and a row of EMPTY cells BEFORE the real
-    header (e.g. 'Rsv No','Reservation Name',... is the 3rd line), so we can't use a
-    plain DictReader. We find the header as the first row with any non-empty cell,
-    map the rows after it, and skip blank separator rows. Duplicate header names
-    (VHP repeats 'Flight Number') collapse to the last column — fine, those aren't
-    columns we read."""
+    VHP exports carry a PREAMBLE before the real header, in two shapes:
+      * reservation/departure: a blank line + a row of EMPTY cells, then the header;
+      * 'Reservation By Creation Date': title lines (hotel name/address/period), then
+        the header on a later line.
+    So we find the header as the first WIDE row (>= 4 non-empty cells) — that skips
+    both preamble shapes while matching the always-wide VHP column headers — then map
+    the rows after it and skip blank separators. Duplicate header names (VHP repeats
+    'Flight Number') collapse to the last column; those aren't columns we read."""
     import io
     rows = list(csv.reader(io.StringIO(_read_text(path))))
-    header_idx = next((i for i, r in enumerate(rows)
-                       if any((c or "").strip() for c in r)), None)
+
+    def _nonempty(r):
+        return sum(1 for c in r if (c or "").strip())
+
+    header_idx = next((i for i, r in enumerate(rows) if _nonempty(r) >= 4), None)
+    if header_idx is None:  # fallback: first row with any content
+        header_idx = next((i for i, r in enumerate(rows) if _nonempty(r)), None)
     if header_idx is None:
         return []
     header = [(c or "").strip() for c in rows[header_idx]]
@@ -241,25 +249,32 @@ def aggregate_pickups_by_creation(rows, agent_key, night_key, qty_key,
     `resid_key` is given, rows are de-duplicated per reservation (in case the page
     lists one row per guest). Sorted by roomNights desc, then agent asc.
     """
-    excl = {" ".join(s.strip().lower().split()) for s in exclude_statuses}
+    def _norm_status(s):
+        # lower-case, turn hyphens/underscores/punctuation into spaces, collapse —
+        # so "No-Show", "No Show" and "NO_SHOW" all compare equal.
+        return re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).strip()
+
+    excl = [_norm_status(s) for s in exclude_statuses]
 
     def _excluded(r):
-        if not status_key:
+        if not (status_key and excl):
             return False
-        st = " ".join(str(r.get(status_key, "")).strip().lower().split())
-        return st in excl
+        st = _norm_status(r.get(status_key, ""))
+        # SUBSTRING match so "Cancelled by BookEngine" / "No-Show" are caught.
+        return any(term in st for term in excl)
 
-    kept = [r for r in rows if not _excluded(r)]
-    if resid_key:
-        seen, dd = set(), []
-        for r in kept:
+    kept, seen = [], set()
+    for r in rows:
+        if _excluded(r):
+            continue
+        if resid_key:
             rid = str(r.get(resid_key, "")).strip()
-            if rid and rid in seen:
-                continue
-            if rid:
-                seen.add(rid)
-            dd.append(r)
-        kept = dd
+            if not rid:
+                continue  # total / malformed row (no reservation number)
+            if rid in seen:
+                continue  # one row per guest -> count the reservation once
+            seen.add(rid)
+        kept.append(r)
 
     buckets = OrderedDict()
     for r in kept:
