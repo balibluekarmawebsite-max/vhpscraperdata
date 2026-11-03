@@ -2278,8 +2278,31 @@ def _segment_untick(driver, exclude_labels):
             _safe_click(driver, allopt)
             time.sleep(0.7)
 
+    # Decide which options to de-select. Match each exclude token by NORMALIZED
+    # SUBSTRING (case-insensitive, whitespace-collapsed) against the real menu
+    # labels, so a config token like "COMPLIMENT" / "HOUSE USE" catches whatever
+    # VHP actually calls them ("Compliment", "Complimentary", "Compliment Room",
+    # "House Use - Staff", ...) AND every such segment, not just the first. If the
+    # menu can't be enumerated, fall back to treating the tokens as exact labels.
+    def _norm(s):
+        # fold to lower-case alphanumerics only, so "House Use", "HouseUse" and
+        # "House-Use" all compare equal (matches daily_json's status normaliser).
+        return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+    tokens = [_norm(x) for x in (exclude_labels or []) if _norm(x)]
+    all_labels = _collect_menu_labels(driver)
+    if all_labels:
+        targets = [lbl for lbl in all_labels
+                   if any(tok in _norm(lbl) for tok in tokens)]
+        if not targets:
+            print("    (config) Segment Code: nothing matched {} in options: {}".format(
+                list(exclude_labels), all_labels[:40]))
+    else:
+        targets = list(exclude_labels or [])   # best-effort: raw tokens as exact labels
+        print("    (config) Segment Code: menu not enumerable; trying raw tokens")
+
     missing = []
-    for lbl in exclude_labels:
+    for lbl in targets:
         item = _find_option(driver, lbl)
         if item is None:
             missing.append(lbl)
@@ -2333,6 +2356,41 @@ _SCROLL_MENU_JS = (
 )
 
 
+_MENU_LABELS_JS = (
+    "var out=[];document.querySelectorAll('.q-menu .q-item__label').forEach("
+    "function(e){var t=(e.textContent||'').trim();if(t)out.push(t);});return out;")
+
+
+def _collect_menu_labels(driver):
+    """Scroll the OPEN q-menu's virtual list top-to-bottom and return its unique
+    option labels (first-seen order). The menu must already be open; returns []
+    if nothing renders."""
+    seen = []
+    try:
+        driver.execute_script(_SCROLL_MENU_JS, 0, True)  # start at the top
+    except Exception:  # noqa: BLE001
+        pass
+    time.sleep(0.2)
+    last, stalls = -1.0, 0
+    for _ in range(150):
+        for lbl in (driver.execute_script(_MENU_LABELS_JS) or []):
+            if lbl not in seen:
+                seen.append(lbl)
+        try:
+            pos = float(driver.execute_script(_SCROLL_MENU_JS, 240, False))
+        except Exception:  # noqa: BLE001
+            break
+        if pos <= last:
+            stalls += 1
+            if stalls >= 3:
+                break
+        else:
+            stalls = 0
+        last = pos
+        time.sleep(0.12)
+    return seen
+
+
 def dump_segment_options(driver):
     """Open the Segment Code multi-select and return ALL its option labels (scrolling
     the virtual list), so segment_untick can be tuned to the EXACT VHP labels.
@@ -2347,31 +2405,7 @@ def dump_segment_options(driver):
             if driver.find_elements(By.CSS_SELECTOR, ".q-menu .q-item"):
                 break
             time.sleep(0.2)
-        js = ("var out=[];document.querySelectorAll('.q-menu .q-item__label').forEach("
-              "function(e){var t=(e.textContent||'').trim();if(t)out.push(t);});return out;")
-        seen = []
-        try:
-            driver.execute_script(_SCROLL_MENU_JS, 0, True)  # top
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(0.2)
-        last, stalls = -1.0, 0
-        for _ in range(150):
-            for lbl in (driver.execute_script(js) or []):
-                if lbl not in seen:
-                    seen.append(lbl)
-            try:
-                pos = float(driver.execute_script(_SCROLL_MENU_JS, 240, False))
-            except Exception:  # noqa: BLE001
-                break
-            if pos <= last:
-                stalls += 1
-                if stalls >= 3:
-                    break
-            else:
-                stalls = 0
-            last = pos
-            time.sleep(0.12)
+        seen = _collect_menu_labels(driver)
         _close_overlays(driver)
         return seen or ["(menu opened but no option labels found)"]
     except Exception as exc:  # noqa: BLE001
