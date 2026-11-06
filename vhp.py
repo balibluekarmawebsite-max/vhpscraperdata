@@ -1408,31 +1408,28 @@ def _click_qday(driver, day):
     return False
 
 
-def _vc_rendered_dates(driver):
-    """Every date currently rendered in the V-Calendar (from each cell's
-    'id-YYYY-MM-DD' class), to decide which way to page."""
-    out = set()
-    for el in driver.find_elements(By.CSS_SELECTOR, ".vc-day"):
+_MONTHS = {m.lower(): i for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June", "July", "August",
+     "September", "October", "November", "December"], start=1)}
+
+
+def _vc_displayed_months(driver):
+    """The months (as year*12+month keys) of the panes currently on screen, read
+    from the '.vc-title' headers. VHP's range picker shows TWO month panes side by
+    side (e.g. 'November 2026' | 'December 2026'), so the displayed month can't be
+    inferred from cell counts — the titles name the panes exactly. Returns a sorted
+    list (one or two entries), or [] if no title parsed yet (grid still rendering)."""
+    out = []
+    for t in driver.find_elements(By.CSS_SELECTOR, ".vc-title"):
         try:
-            m = re.search(r"\bid-(\d{4})-(\d{2})-(\d{2})\b", el.get_attribute("class") or "")
-            if m:
-                out.add(datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+            if not t.is_displayed():
+                continue
+            parts = (t.text or "").strip().split()        # e.g. "November 2026"
+            if len(parts) >= 2 and parts[0].lower() in _MONTHS and parts[-1].isdigit():
+                out.append(int(parts[-1]) * 12 + _MONTHS[parts[0].lower()])
         except Exception:  # noqa: BLE001
             continue
-    return out
-
-
-def _vc_displayed_month(driver):
-    """(year, month) the V-Calendar grid is currently showing — computed WITHOUT
-    relying on any class name. A 42-cell grid is dominated by its own month
-    (28-31 cells); each adjacent month spills at most ~7 days in. So the modal
-    month among all rendered 'id-YYYY-MM-DD' dates is the displayed month. Returns
-    None if nothing is rendered yet."""
-    counts = {}
-    for d in _vc_rendered_dates(driver):
-        key = (d.year, d.month)
-        counts[key] = counts.get(key, 0) + 1
-    return max(counts, key=counts.get) if counts else None
+    return sorted(set(out))
 
 
 def _vc_click_arrow(driver, direction):
@@ -1457,18 +1454,22 @@ def _vc_click_arrow(driver, direction):
 def _click_vc_day(driver, date, max_nav=30):
     """Click a V-Calendar day by its exact 'id-YYYY-MM-DD' class.
 
-    Pages the calendar until it is SHOWING the target date's own month, then
-    clicks that date's cell. This is what makes a range spanning two months work
-    (e.g. 30/10 -> 05/11): the adjacent month's spillover days carry the same
-    'id-YYYY-MM-DD' class, but clicking a spillover cell navigates the grid instead
-    of selecting the date, so the end date would be lost. By paging to the target
-    date's OWN month first — where its only cell is the real in-month one — we
-    never click a spillover cell, and need no class-name guessing to tell them
-    apart (the displayed month is found by cell-count, not by class)."""
+    Pages the calendar until the target date's month is one of the panes on
+    screen, then clicks that date's IN-MONTH cell. This is what makes a range
+    spanning two months work (e.g. 30/10 -> 05/11): VHP shows two month panes side
+    by side, and the same date also appears as a faint spillover cell in the
+    neighbouring pane — clicking a spillover cell navigates the grid instead of
+    selecting, so the end date would be lost. Requiring ' in-month ' (and excluding
+    ' not-in-month ') always picks the real cell; reading the pane titles (not a
+    cell count, which two panes make ambiguous) tells us which months are shown."""
     iso = date.strftime("%Y-%m-%d")
-    xp = "//*[contains(concat(' ',normalize-space(@class),' '),' id-{iso} ')]".format(iso=iso)
+    xp_in = ("//*[contains(concat(' ',normalize-space(@class),' '),' id-{iso} ')]"
+             "[contains(concat(' ',normalize-space(@class),' '),' in-month ')]"
+             "[not(contains(concat(' ',normalize-space(@class),' '),' not-in-month '))]"
+             ).format(iso=iso)
+    xp_any = "//*[contains(concat(' ',normalize-space(@class),' '),' id-{iso} ')]".format(iso=iso)
 
-    def _click():
+    def _click(xp):
         for el in driver.find_elements(By.XPATH, xp):
             try:
                 if not el.is_displayed():
@@ -1485,17 +1486,17 @@ def _click_vc_day(driver, date, max_nav=30):
 
     want_ym = date.year * 12 + date.month
     for _ in range(max_nav):
-        ym = _vc_displayed_month(driver)
-        if ym is not None:
-            showing_ym = ym[0] * 12 + ym[1]
-            if showing_ym == want_ym:
-                if _click():                          # grid is on the target's month
-                    return True
-            else:                                     # page toward the target's month
-                _vc_click_arrow(driver, "left" if want_ym < showing_ym else "right")
-        # else: nothing rendered yet (grid still rendering / open animation) -> wait
+        shown = _vc_displayed_months(driver)          # months of the panes on screen
+        if shown:
+            if want_ym < shown[0]:
+                _vc_click_arrow(driver, "left")        # target is before both panes
+            elif want_ym > shown[-1]:
+                _vc_click_arrow(driver, "right")       # target is after both panes
+            elif _click(xp_in):                        # target month is on screen
+                return True
+        # else: no title parsed yet (grid still rendering / animating) -> wait
         time.sleep(0.4)
-    return _click()  # last resort
+    return _click(xp_in) or _click(xp_any)             # last resort
 
 
 def _try_calendar_range(driver, field, start, end):
