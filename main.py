@@ -270,10 +270,11 @@ def main(argv):
     # closed/unreachable — pop a desktop warning so it isn't missed (no webhook
     # needed), and exit non-zero so Task Scheduler flags the task red.
     if total_ok == 0 and total_fail > 0:
-        desktop_alert("VHP {} run FAILED: 0 ok, {} failed. The 3 VHP Chrome windows "
-                      "are probably closed/logged out — open them (open-all.bat), "
-                      "log in, then re-run run-{}.bat.".format(
-                          args.cadence, total_fail, args.cadence))
+        desktop_alert("VHP {} run FAILED: 0 ok, {} failed. Open the newest log in "
+                      "C:\\vhp-scraper\\logs to see why. Usual causes: the 3 Chrome "
+                      "windows closed or logged out (open-all.bat, then log in), OR a "
+                      "date/report error (look for the '(period)' lines). Then re-run "
+                      "run-{}.bat.".format(args.cadence, total_fail, args.cadence))
         return 1
     return 0
 

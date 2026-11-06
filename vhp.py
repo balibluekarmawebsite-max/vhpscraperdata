@@ -1422,6 +1422,25 @@ def _vc_rendered_dates(driver):
     return out
 
 
+def _vc_rendered_in_month(driver):
+    """Dates of the cells that belong to the DISPLAYED month (cells WITHOUT the
+    'is-not-in-month' class), so we can tell which month the V-Calendar grid is
+    actually on — the spillover days of the previous/next month carry real
+    'id-YYYY-MM-DD' classes too, so they must be excluded when judging the month."""
+    out = set()
+    for el in driver.find_elements(By.CSS_SELECTOR, ".vc-day"):
+        try:
+            cls = el.get_attribute("class") or ""
+            if "is-not-in-month" in cls:
+                continue
+            m = re.search(r"\bid-(\d{4})-(\d{2})-(\d{2})\b", cls)
+            if m:
+                out.add(datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
 def _vc_click_arrow(driver, direction):
     """Click the V-Calendar prev/next month arrow (< or >)."""
     sels = {
@@ -1442,39 +1461,51 @@ def _vc_click_arrow(driver, direction):
 
 
 def _click_vc_day(driver, date, max_nav=30):
-    """Click a V-Calendar day by its exact 'id-YYYY-MM-DD' class (paging the
-    calendar toward the target month if it isn't currently shown, and retrying
-    while the grid renders / the open animation settles). Prefers the real
-    in-month cell over an adjacent-month spillover cell of the same date."""
+    """Click a V-Calendar day by its exact 'id-YYYY-MM-DD' class.
+
+    Pages the calendar until it is SHOWING the target date's own month, then
+    clicks the real in-month cell. This is what makes a range spanning two months
+    work (e.g. 30/10 -> 05/11): the adjacent month's spillover days carry the same
+    'id-YYYY-MM-DD' class, but clicking a spillover cell navigates the grid instead
+    of selecting the date, so the end date would be lost. Deciding which way to
+    page from the DISPLAYED month (the in-month cells) rather than from the
+    spillover-polluted min/max of every rendered date is what avoids that premature
+    spillover click. A spillover cell is only ever a last resort."""
     iso = date.strftime("%Y-%m-%d")
     xp_in = ("//*[contains(concat(' ',normalize-space(@class),' '),' id-{iso} ')]"
              "[not(contains(concat(' ',normalize-space(@class),' '),' is-not-in-month '))]"
              ).format(iso=iso)
     xp_any = "//*[contains(concat(' ',normalize-space(@class),' '),' id-{iso} ')]".format(iso=iso)
-    for _ in range(max_nav):
-        for xp in (xp_in, xp_any):
-            for el in driver.find_elements(By.XPATH, xp):
-                try:
-                    if not el.is_displayed():
-                        continue
-                    target = el
-                    spans = el.find_elements(By.CSS_SELECTOR, ".vc-day-content")
-                    if spans and spans[0].is_displayed():
-                        target = spans[0]
-                    _force_click(driver, target)  # bypass any intercepting overlay
-                    return True
-                except Exception:  # noqa: BLE001
+
+    def _click(xp):
+        for el in driver.find_elements(By.XPATH, xp):
+            try:
+                if not el.is_displayed():
                     continue
-        rendered = _vc_rendered_dates(driver)
-        if rendered and date < min(rendered):
-            _vc_click_arrow(driver, "left")
-        elif rendered and date > max(rendered):
-            _vc_click_arrow(driver, "right")
-        # else: in-range (or nothing rendered yet) -> the grid may still be
-        # rendering / the open animation settling, so wait and retry rather than
-        # giving up (this is what made a day click miss under a slow render).
+                target = el
+                spans = el.find_elements(By.CSS_SELECTOR, ".vc-day-content")
+                if spans and spans[0].is_displayed():
+                    target = spans[0]
+                _force_click(driver, target)  # bypass any intercepting overlay
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
+    want_ym = date.year * 12 + date.month
+    for _ in range(max_nav):
+        in_month = _vc_rendered_in_month(driver)
+        if in_month:
+            ref = max(in_month)                       # any in-month day names the month
+            showing_ym = ref.year * 12 + ref.month
+            if showing_ym == want_ym:
+                if _click(xp_in):                     # grid is on the target month
+                    return True
+            else:                                     # page toward the target's month
+                _vc_click_arrow(driver, "left" if want_ym < showing_ym else "right")
+        # else: nothing in-month yet (grid still rendering / open animation) -> wait
         time.sleep(0.4)
-    return False
+    return _click(xp_any)  # last resort: a spillover cell of the same date
 
 
 def _try_calendar_range(driver, field, start, end):
