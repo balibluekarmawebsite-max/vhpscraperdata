@@ -22,30 +22,35 @@ LOGIN_URL = "https://e1-vhp.com/login"
 # HTML + every child img/canvas/svg/div/i with tag/class/id/size/position, so the
 # wide digit box is easy to tell apart from the small square refresh icon.
 _DUMP_JS = r"""
+function bg(e){ try{ return (getComputedStyle(e).backgroundImage||'').slice(0,70); }catch(_){ return ''; } }
 function info(e){
   var r = e.getBoundingClientRect();
   return {tag:e.tagName, cls:(e.getAttribute&&e.getAttribute('class'))||'',
-          id:e.id||'', w:Math.round(r.width), h:Math.round(r.height),
+          dcy:(e.getAttribute&&e.getAttribute('data-cy'))||'', id:e.id||'',
+          w:Math.round(r.width), h:Math.round(r.height),
           x:Math.round(r.left), y:Math.round(r.top),
-          src:((e.getAttribute&&e.getAttribute('src'))||'').slice(0,80)};
+          src:((e.getAttribute&&e.getAttribute('src'))||'').slice(0,90), bg:bg(e)};
 }
+// anchor: the CAPTCHA input (stable data-cy, else placeholder)
 var inp=null, ins=document.querySelectorAll('input');
 for(var i=0;i<ins.length;i++){
-  var ph=(ins[i].getAttribute('placeholder')||'').toLowerCase();
-  if(ph.indexOf('captcha')>=0){ inp=ins[i]; break; }
+  if((ins[i].getAttribute('data-cy')||'')==='captcha-input-login'){ inp=ins[i]; break; }
+  if(((ins[i].getAttribute('placeholder')||'').toLowerCase()).indexOf('captcha')>=0){ inp=ins[i]; }
 }
-var out={input: inp?info(inp):null, container:'', candidates:[]};
+var out={input: inp?info(inp):null, images:[], row:[]};
+// (1) every img/canvas/svg on the page
+var imgs=document.querySelectorAll('img,canvas,svg');
+for(var j=0;j<imgs.length;j++){ var r=imgs[j].getBoundingClientRect();
+  if(r.width>=8 && r.height>=8){ out.images.push(info(imgs[j])); } }
+// (2) the whole CAPTCHA row: climb until the box is wide enough to hold
+// refresh-icon + digits + input (or 8 levels), then list its children.
 if(inp){
   var box=inp;
-  for(var k=0;k<4 && box.parentElement;k++){ box=box.parentElement; }
-  out.container=(box.outerHTML||'').replace(/\s+/g,' ').slice(0,3500);
-  var els=box.querySelectorAll('img,canvas,svg,div,i,span,button');
-  for(var j=0;j<els.length;j++){
-    var r=els[j].getBoundingClientRect();
-    if(r.width>=12 && r.height>=10 && r.width<500 && r.height<160){
-      out.candidates.push(info(els[j]));
-    }
-  }
+  for(var k=0;k<8 && box.parentElement;k++){ box=box.parentElement;
+    if(box.getBoundingClientRect().width>=250) break; }
+  var kids=box.querySelectorAll('*');
+  for(var m=0;m<kids.length && out.row.length<40;m++){ var rr=kids[m].getBoundingClientRect();
+    if(rr.width>=10 && rr.height>=10 && rr.width<500 && rr.height<160){ out.row.push(info(kids[m])); } }
 }
 return JSON.stringify(out, null, 1);
 """
