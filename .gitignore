@@ -34,3 +34,6 @@ desktop.ini
 .DS_Store
 .idea/
 .vscode/
+
+# collected CAPTCHA training images (local only)
+captcha_samples/
