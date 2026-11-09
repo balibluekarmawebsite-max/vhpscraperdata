@@ -1,25 +1,35 @@
 """
 test_captcha.py — check how well the bot can READ the VHP login CAPTCHA, WITHOUT
-logging in or submitting anything (so there is ZERO risk of locking the account).
+logging in or submitting anything (ZERO risk of locking the account).
 
 Use it to judge the hit-rate BEFORE trusting auto-login. Get a property's window
-onto the VHP /login page (so the CAPTCHA is showing), then:
+onto the VHP /login page (this tool loads it for you), then:
 
-    python test_captcha.py bkds          # read the CAPTCHA once
-    python test_captcha.py bkds 10        # read 10 CAPTCHAs (refresh between reads)
+    python test_captcha.py bkv 20     # read 20 CAPTCHAs (auto-refreshes between)
 
-For each read it prints what the OCR saw and whether it was CONFIDENT (it would
-auto-submit that one) or would hand off to a human. A healthy result is lots of
-CONFIDENT reads whose digits actually match what you see on screen; if it's mostly
-"not confident" or the confident ones are WRONG, leave auto-CAPTCHA off (create
-logs/.no_auto_captcha) and keep typing them by hand.
+For each read it prints the predicted digits + a confidence, and whether that read
+is confident enough to AUTO-SUBMIT (>= CAPTCHA_CNN_MIN_CONF). A healthy result:
+most reads match what you see in the window, and the CONFIDENT ones are always
+right. It only RELOADS the page to get a new CAPTCHA — it never submits.
 """
 import os
 import sys
+import time
 
 import captcha
 import config
-from browser import make_driver_attached
+from browser import kill_stale_chromedrivers, make_driver_attached
+
+LOGIN_URL = "https://e1-vhp.com/login"
+
+
+def _new_captcha(driver):
+    """Reload the login page (SAFE — never submits) for a fresh CAPTCHA."""
+    try:
+        driver.get(LOGIN_URL)
+    except Exception:  # noqa: BLE001
+        pass
+    time.sleep(1.3)
 
 
 def main(argv):
@@ -27,66 +37,61 @@ def main(argv):
     argv = [a for a in argv if a != "--save"]
     if not argv:
         print("usage: python test_captcha.py <bkds|bkdu|bkv> [count] [--save]")
-        print("  --save : also write the CAPTCHA image + every processed variant to")
-        print("           captcha_debug\\ and print each raw OCR read (for tuning).")
         return 2
     code = argv[0].strip().lower()
-    count = int(argv[1]) if len(argv) > 1 else 1
+    count = int(argv[1]) if len(argv) > 1 else 10
     prop = next((p for p in config.PROPERTIES if p["code"] == code), None)
     if prop is None:
         print("unknown property {!r} (use bkds/bkdu/bkv)".format(code))
         return 2
 
-    if not captcha.ocr_available():
-        print("OCR is NOT available: {}".format(captcha.ocr_unavailable_reason()))
-        print("install it on this PC:")
-        print("  pip install pytesseract pillow")
-        print("  + the Tesseract-OCR engine (set TESSERACT_CMD to tesseract.exe if "
-              "it's not on PATH)")
-        return 1
-    print("OpenCV (better line removal): {}".format(
-        "available" if captcha.cv2_available() else "NOT installed "
-        "(optional: pip install opencv-python numpy)"))
+    try:
+        import captcha_cnn
+        has_cnn = captcha_cnn.available()
+    except Exception:  # noqa: BLE001
+        has_cnn = False
+    print("CAPTCHA reader: {}".format(
+        "trained CNN model" if has_cnn else "OCR only (captcha_cnn.npz not found — did you git pull?)"))
+    thr = float(getattr(config, "CAPTCHA_CNN_MIN_CONF", 0.97))
+    print("auto-submit threshold (confidence): {:.2f}\n".format(thr))
 
     try:
+        kill_stale_chromedrivers()
         driver = make_driver_attached(prop["debug_port"], config.DOWNLOADS_DIR)
     except Exception as exc:  # noqa: BLE001
-        print("could not attach to the {} window on port {} (open it with open-{}.bat "
-              "and get it to the VHP login page first): {}"
+        print("could not attach to the {} window on port {} (open-{}.bat first): {}"
               .format(code, prop.get("debug_port"), code, exc))
         return 1
 
+    _new_captcha(driver)
     save_dir = os.path.join(config.BASE, "captcha_debug") if save else None
-    print("Reading the CAPTCHA on the {} window. Make sure it's on the VHP login "
-          "page (CAPTCHA visible). NOTHING is submitted.".format(code.upper()))
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+
+    print("Reading {} CAPTCHAs on the {} window (NOTHING is submitted).\n".format(count, code.upper()))
     confident = 0
     for i in range(count):
-        _img, reads, value = captcha.read_debug(driver, save_dir)
-        if value:
+        digits, conf, source = captcha.read(driver)
+        ok = bool(digits) and conf >= thr
+        if ok:
             confident += 1
-            print("  read #{}: '{}'   -> CONFIDENT (would auto-submit)".format(i + 1, value))
-        else:
-            print("  read #{}: (not confident)   -> would hand to a human".format(i + 1))
-        if save:
-            # Show what each processed variant produced, so the preprocessing can be
-            # tuned. Group identical digit-strings so it's easy to read.
-            tally = {}
-            for name, psm, d in reads:
-                tally.setdefault(d or "(empty)", []).append("{}/psm{}".format(name, psm))
-            for d, who in sorted(tally.items(), key=lambda kv: -len(kv[1])):
-                print("        {:>10}  x{:<2}  {}".format(d, len(who), ", ".join(who[:4])))
-        if i < count - 1:
+        tag = "CONFIDENT — would auto-submit" if ok else "low — would REFRESH (no submit)"
+        print("  #{:<2} predicted: {:<8} conf {:.2f}   -> {}".format(
+            i + 1, digits or "(none)", conf, tag))
+        if save_dir:
             try:
-                input("  click VHP's refresh-CAPTCHA icon, then press Enter for the "
-                      "next read... ")
-            except EOFError:
-                break
-    print("\n{} / {} reads were confident. Check that the confident ones MATCHED "
-          "what you saw before trusting auto-login.".format(confident, count))
-    if save:
-        print("\nSaved the CAPTCHA image + variants to: {}".format(save_dir))
-        print("Send me 'captcha_raw.png' (and a few of the others) + what the digits "
-              "ACTUALLY were, and I'll tune the preprocessing to your CAPTCHA.")
+                img = captcha._grab(driver)
+                if img is not None:
+                    img.save(os.path.join(save_dir, "cap_{:02d}_{}.png".format(i + 1, digits or "x")))
+            except Exception:  # noqa: BLE001
+                pass
+        if i < count - 1:
+            _new_captcha(driver)
+    print("\n{} / {} reads were confident enough to auto-submit.".format(confident, count))
+    print("CHECK: compare the predicted digits above against what you saw in the window.")
+    print("If the CONFIDENT ones all matched, the reader is good to turn on.")
+    if save_dir:
+        print("Saved the CAPTCHA images to: {}".format(save_dir))
     return 0
 
 

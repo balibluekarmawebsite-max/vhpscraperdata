@@ -532,6 +532,10 @@ CAPTCHA_LEN = 6                     # EXACT expected length (VHP = 6 digits); 0 
                                     # the MIN/MAX range only. Exact length cuts false reads.
 CAPTCHA_MIN_VOTES = 3              # how many preprocessings must agree to auto-submit
                                     # (higher = safer/rarer; lower = more attempts)
+# Trained-CNN reader (captcha_cnn.npz). The CNN gives a confidence (lowest per-digit
+# softmax prob); the bot SUBMITS only at/above this, else it refreshes the CAPTCHA
+# (no login attempt). Raise toward 0.99 to submit less often but even more safely.
+CAPTCHA_CNN_MIN_CONF = 0.97
 AUTO_CAPTCHA_KILL_FILE = os.path.join(LOGS_DIR, ".no_auto_captcha")
 
 

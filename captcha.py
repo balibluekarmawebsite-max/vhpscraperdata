@@ -296,9 +296,49 @@ def _cfg_lengths():
             getattr(config, "CAPTCHA_MIN_VOTES", 3))
 
 
+def read(driver):
+    """Best-effort read for TESTING/diagnostics: (digits_or_None, confidence, source).
+    Uses the trained CNN when its model is present, else OCR consensus. Does NOT
+    apply the submit threshold — the caller decides. Never raises."""
+    try:
+        import captcha_cnn
+        if captcha_cnn.available():
+            img = _grab(driver)
+            if img is None:
+                return None, 0.0, "cnn"
+            d, c = captcha_cnn.predict(img)
+            return d, c, "cnn"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        img = _grab(driver)
+        if img is None:
+            return None, 0.0, "ocr"
+        reads = _ocr_variants(_all_variants(img))
+        lo, hi, exact, votes = _cfg_lengths()
+        val = _pick(reads, lo, hi, exact, votes)
+        conf = (([d for _n, _p, d in reads].count(val) / max(1, len(reads))) if val else 0.0)
+        return val, conf, "ocr"
+    except Exception:  # noqa: BLE001
+        return None, 0.0, "ocr"
+
+
 def solve_captcha(driver, min_len=None, max_len=None):
-    """Return the CAPTCHA digits ONLY if confidently read (enough preprocessings
-    agree), else None. Never raises."""
+    """Return the CAPTCHA digits ONLY if confidently read, else None. Prefers the
+    trained CNN (captcha_cnn.npz); falls back to multi-variant OCR consensus when
+    the model isn't present. Never raises."""
+    # Trained CNN first — it reads VHP's strike-through CAPTCHA, which OCR cannot.
+    try:
+        import captcha_cnn
+        if captcha_cnn.available():
+            img = _grab(driver)
+            if img is None:
+                return None
+            digits, conf = captcha_cnn.predict(img)
+            thr = float(getattr(config, "CAPTCHA_CNN_MIN_CONF", 0.97))
+            return digits if (digits and conf >= thr) else None
+    except Exception:  # noqa: BLE001 - CNN path failed -> OCR fallback below
+        pass
     if not _OCR_OK:
         return None
     lo, hi, exact, votes = _cfg_lengths()
