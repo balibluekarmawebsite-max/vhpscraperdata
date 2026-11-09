@@ -19,6 +19,7 @@ preprocessings must agree), CAPTCHA_MIN_LEN / CAPTCHA_MAX_LEN (length range).
 test_captcha.py --save dumps the image + every processed variant + each read so the
 preprocessing can be tuned to the real CAPTCHA.
 """
+import base64
 import os
 import re
 from collections import Counter
@@ -84,29 +85,99 @@ _CAPTCHA_IMG_FALLBACK_XPATH = (
 )
 
 
+def _center_y(el):
+    try:
+        return (el.location or {}).get("y", 0) + (el.size or {}).get("height", 0) / 2.0
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _find_captcha_image(driver):
+    """Find the CAPTCHA DIGITS element.
+
+    VHP renders the digits on a <canvas> (≈150×40) sitting just LEFT of the
+    'Enter CAPTCHA' input (data-cy=captcha-input-login); a small ≈23px refresh-icon
+    <img> sits further left inside a button. The old selectors matched that tiny
+    icon, so OCR was reading the ↻ icon, never the digits. So: prefer the canvas
+    anchored to the input (same row, to its left); then the widest canvas; then a
+    WIDE img/svg (never the narrow icon)."""
+    inp = None
+    try:
+        inp = next((e for e in driver.find_elements(
+            By.CSS_SELECTOR, "input[data-cy='captcha-input-login']") if e.is_displayed()), None)
+    except Exception:  # noqa: BLE001
+        inp = None
+
+    canvases = []
+    for c in driver.find_elements(By.TAG_NAME, "canvas"):
+        try:
+            if c.is_displayed() and (c.size or {}).get("width", 0) >= 40:
+                canvases.append(c)
+        except Exception:  # noqa: BLE001
+            continue
+    if inp is not None and canvases:
+        iy, ix = _center_y(inp), (inp.location or {}).get("x", 0)
+        ih = (inp.size or {}).get("height", 40)
+        row_left = []
+        for c in canvases:
+            cy = _center_y(c)
+            if cy is not None and iy is not None and abs(cy - iy) <= max(ih, 24) \
+                    and (c.location or {}).get("x", 0) < ix:
+                row_left.append(c)
+        if row_left:
+            return max(row_left, key=lambda c: (c.size or {}).get("width", 0))
+    if canvases:
+        return max(canvases, key=lambda c: (c.size or {}).get("width", 0))
+
+    # Fallbacks: the original selectors, but require a WIDE element so the ~23px
+    # refresh icon can never be chosen again.
     for sel in _CAPTCHA_IMG_SELECTORS:
         for el in driver.find_elements(By.CSS_SELECTOR, sel):
             try:
-                if el.is_displayed() and (el.size or {}).get("width", 0) > 20:
+                if el.is_displayed() and (el.size or {}).get("width", 0) >= 60:
                     return el
             except Exception:  # noqa: BLE001 - stale element, keep looking
                 continue
     for el in driver.find_elements(By.XPATH, _CAPTCHA_IMG_FALLBACK_XPATH):
         try:
-            if el.is_displayed() and (el.size or {}).get("width", 0) > 20:
+            if el.is_displayed() and (el.size or {}).get("width", 0) >= 60:
                 return el
         except Exception:  # noqa: BLE001
             continue
     return None
 
 
+def canvas_png(driver, el):
+    """Exact PNG bytes of a <canvas> via toDataURL (crisper than a screenshot, and
+    unaffected by DPI/scroll). None if el isn't a canvas or the read fails/taints."""
+    try:
+        if (el.tag_name or "").lower() != "canvas":
+            return None
+        data = driver.execute_script(
+            "try{return arguments[0].toDataURL('image/png');}catch(e){return null;}", el)
+        if data and data.startswith("data:image") and "," in data:
+            return base64.b64decode(data.split(",", 1)[1])
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def _grab(driver):
-    """Screenshot the CAPTCHA element as an RGB PIL image, or None."""
+    """The CAPTCHA digits as an RGB PIL image, or None. Reads a <canvas> via
+    toDataURL (exact pixels); falls back to an element screenshot."""
     el = _find_captcha_image(driver)
     if el is None:
         return None
-    return Image.open(BytesIO(el.screenshot_as_png)).convert("RGB")
+    png = canvas_png(driver, el)
+    if png is not None:
+        try:
+            return Image.open(BytesIO(png)).convert("RGB")
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        return Image.open(BytesIO(el.screenshot_as_png)).convert("RGB")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _pil_variants(img):

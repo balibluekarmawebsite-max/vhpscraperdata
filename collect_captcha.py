@@ -31,7 +31,7 @@ import time
 
 import config
 from browser import kill_stale_chromedrivers, make_driver_attached
-from captcha import _find_captcha_image
+from captcha import _find_captcha_image, canvas_png
 from runlock import RunLock
 
 LOGIN_URL = "https://e1-vhp.com/login"
@@ -43,10 +43,14 @@ def _prop(code):
 
 
 def _grab_png(driver):
-    """PNG bytes of the current CAPTCHA image, or None if not found/readable."""
+    """PNG bytes of the current CAPTCHA DIGITS, or None. Reads the <canvas> exactly
+    via toDataURL; falls back to an element screenshot."""
     el = _find_captcha_image(driver)
     if el is None:
         return None
+    png = canvas_png(driver, el)
+    if png is not None:
+        return png
     try:
         return el.screenshot_as_png
     except Exception:  # noqa: BLE001 - stale/again next loop
