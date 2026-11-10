@@ -127,34 +127,30 @@ def main(argv):
         time.sleep(2.5)  # let the filter panel hydrate
 
         if args.diagseg:
-            print("\n===== SEGMENT DE-SELECT DIAGNOSTIC =====")
+            import csv as _csv
+            print("\n===== SEGMENT x SHOW-REVENUE DIAGNOSTIC =====")
             print("recorder: {}".format(vhp.install_request_recorder(driver)))
             print("panel:    {}".format(vhp._ensure_filter_panel_open(driver)))
             vhp.set_period(driver, report)   # set the Month exactly like the daily push
-            print("segment value (fresh):           {!r}".format(vhp._segment_value(driver)))
-
             labels = report.get("segment_untick") or ["COMPLIMENT", "HOUSE USE"]
-            try:
-                vhp._segment_untick(driver, labels)
-            except Exception as exc:  # noqa: BLE001
-                print("de-select ERR: {}".format(vhp._describe(exc)))
-            print("segment value (after de-select): {!r}".format(vhp._segment_value(driver)))
 
-            # Clear the buffer so only the SEARCH-triggered requests remain, then search.
-            vhp.clear_recorded_requests(driver)
-            print("segment value (just before SEARCH): {!r}".format(vhp._segment_value(driver)))
-            vhp.click_search(driver)
-            vhp.wait_for_report_data(driver)
-            time.sleep(1.0)
-            print("segment value (after SEARCH):    {!r}".format(vhp._segment_value(driver)))
+            def _read_occupied(path):
+                """Read the exported CSV right here on the PC and return the
+                'Room Occupied' value per month (so November shows in the console)."""
+                try:
+                    with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+                        rows = list(_csv.reader(fh))
+                except Exception as e:  # noqa: BLE001
+                    return "(read err {})".format(e)
+                header = rows[0] if rows else []
+                months = [((h or "").split()[-1] if (h or "").split() else "?") for h in header[1:]]
+                for r in rows:
+                    if r and r[0].strip().lower() == "room occupied":
+                        return ", ".join("{}={}".format(m, (v or "").strip())
+                                         for m, v in zip(months, r[1:]) if (v or "").strip())
+                return "(no 'Room Occupied' row found)"
 
-            print("\n----- SEARCH request(s) captured (look for the segment filter) -----")
-            for line in vhp.dump_recorded_requests(driver):
-                print("  " + line)
-
-            # Export FIRST (before any menu re-open can perturb state), report the CSV.
-            print("\n----- exporting to correlate with the request above -----")
-            try:
+            def _export(tag):
                 for _cmd in ("Browser.setDownloadBehavior", "Page.setDownloadBehavior"):
                     try:
                         driver.execute_cdp_cmd(_cmd, {"behavior": "allow",
@@ -165,22 +161,44 @@ def main(argv):
                 since = time.time()
                 vhp.export_print_csv(driver)
                 raw = vhp.wait_for_download(config.DOWNLOAD_WATCH, before=before, since=since)
-                dest = vhp.rename_download(raw, prop["code"], "diagseg", config.DOWNLOADS_DIR)
-                print("SAVED: {}".format(dest))
-            except Exception as exc:  # noqa: BLE001
-                print("export ERR: {}".format(vhp._describe(exc)))
+                return vhp.rename_download(raw, prop["code"], "diagseg-" + tag, config.DOWNLOADS_DIR)
 
-            # Finally, reopen the menu to see whether SEARCH reset the de-select.
-            try:
-                m = vhp.segment_checked_map(driver)
-                keep = {k: v for k, v in m.items()
-                        if k.upper() in ("ALL", "COMPLIMENT", "HOUSE USE") or v is False}
-                print("\nsegment checked-state AFTER search (All/Compliment/House Use + any still-off): {}"
-                      .format(keep or m))
-            except Exception as exc:  # noqa: BLE001
-                print("checked-map ERR: {}".format(vhp._describe(exc)))
+            def _run_variant(tag, show_revenue):
+                print("\n--- {} : Show Revenue {} + segment de-select ---".format(
+                    tag, "ON" if show_revenue else "OFF"))
+                try:
+                    vhp._set_checkbox(driver, "Show Revenue", show_revenue)
+                except Exception as e:  # noqa: BLE001
+                    print("   (Show Revenue toggle err: {})".format(vhp._describe(e)))
+                print("   segment value after Show Revenue toggle: {!r}".format(vhp._segment_value(driver)))
+                try:
+                    vhp._segment_untick(driver, labels)
+                except Exception as e:  # noqa: BLE001
+                    print("   (de-select err: {})".format(vhp._describe(e)))
+                print("   segment value just before SEARCH:        {!r}".format(vhp._segment_value(driver)))
+                vhp.clear_recorded_requests(driver)
+                vhp.click_search(driver)
+                vhp.wait_for_report_data(driver)
+                time.sleep(1.0)
+                print("   SEARCH request(s) captured:")
+                for line in vhp.dump_recorded_requests(driver):
+                    print("      " + line)
+                try:
+                    dest = _export(tag)
+                    print("   SAVED: {}".format(dest))
+                    print("   >>> Room Occupied by month: {}".format(_read_occupied(dest)))
+                except Exception as e:  # noqa: BLE001
+                    print("   (export err: {})".format(vhp._describe(e)))
 
-            print("\n----- diagseg done (nothing uploaded). Send me ALL of the above. -----")
+            _run_variant("A-segonly", False)   # Show Revenue OFF  -> expect NET  (~341)
+            _run_variant("B-revenue", True)    # Show Revenue ON   -> NET or GROSS?
+
+            print("\n----- diagseg done. Compare NOVEMBER (first value) in A vs B: -----")
+            print("  A (Show Revenue OFF): November should be NET (~341).")
+            print("  B (Show Revenue ON):  if November is GROSS (~353), Show Revenue is")
+            print("     overriding the Segment filter -> we must pull occupancy and revenue")
+            print("     separately. If it's also ~341, we can safely enable Show Revenue.")
+            print("  Send me ALL of the above (the two 'Room Occupied by month' lines + requests).")
             return 0
 
         if args.display:
