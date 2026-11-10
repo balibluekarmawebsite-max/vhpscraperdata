@@ -2517,15 +2517,44 @@ def _segment_combo(driver):
         By.CSS_SELECTOR, "[data-cy='{}'] [role='combobox']".format(_SEGMENT_CY))), None)
 
 
-def _ac_click(driver, el):
-    """A REAL mouse click (ActionChains move+press+release) — opens finicky
-    components that ignore Selenium's synthetic .click()."""
-    from selenium.webdriver.common.action_chains import ActionChains
+def _vp_prepare(driver, el):
+    """Make the window tall and scroll `el` to center, so a real click can reach it
+    (the filter panel sits below the fold on a short window -> out-of-bounds)."""
     try:
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        info = driver.execute_cdp_cmd("Browser.getWindowForTarget", {})
+        if (info.get("bounds") or {}).get("windowState") not in ("maximized", "fullscreen"):
+            driver.execute_cdp_cmd("Browser.setWindowBounds", {
+                "windowId": info.get("windowId"),
+                "bounds": {"width": 1400, "height": 1100, "windowState": "normal"}})
     except Exception:  # noqa: BLE001
         pass
-    ActionChains(driver).move_to_element(el).pause(0.1).click().perform()
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center',inline:'center'});", el)
+        time.sleep(0.3)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _ac_click(driver, el):
+    """A REAL mouse click (ActionChains) — opens components that ignore synthetic
+    .click(). Makes the element reachable first, and falls back to an offset aim."""
+    from selenium.webdriver.common.action_chains import ActionChains
+    _vp_prepare(driver, el)
+    try:
+        ActionChains(driver).move_to_element(el).pause(0.1).click().perform()
+    except Exception:  # noqa: BLE001 - center may still be off; aim near top-left
+        ActionChains(driver).move_to_element_with_offset(el, 3, 3).pause(0.1).click().perform()
+
+
+def _pointer_open(driver, el):
+    """Dispatch a full pointer+mouse sequence (Quasar v2 opens on pointerdown)."""
+    driver.execute_script(r"""
+      var e=arguments[0];
+      ['pointerover','pointerenter','pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){
+        try{var C=t.indexOf('pointer')===0?window.PointerEvent:window.MouseEvent;
+            e.dispatchEvent(new C(t,{bubbles:true,cancelable:true,view:window,pointerId:1,button:0}));}catch(_){}
+      });
+    """, el)
 
 
 def _open_segment_menu(driver):
@@ -2537,6 +2566,10 @@ def _open_segment_menu(driver):
     field = _find_segment_field(driver)
     native = next((n for n in driver.find_elements(
         By.CSS_SELECTOR, "[data-cy='{}']".format(_SEGMENT_CY))), None)
+    control = None
+    if field is not None:
+        control = next((c for c in field.find_elements(
+            By.CSS_SELECTOR, ".q-field__control")), None)
     owns = (combo.get_attribute("aria-owns") if combo else "") or ""
 
     def _opts():
@@ -2546,17 +2579,17 @@ def _open_segment_menu(driver):
             return []
 
     attempts = []
-    if combo is not None:
-        attempts.append(("actionchains combo", lambda: _ac_click(driver, combo)))
-        attempts.append(("force-click combo", lambda: _force_click(driver, combo)))
     if native is not None:
         attempts.append(("actionchains native", lambda: _ac_click(driver, native)))
+        attempts.append(("pointer native", lambda: _pointer_open(driver, native)))
+    if control is not None:
+        attempts.append(("actionchains control", lambda: _ac_click(driver, control)))
+        attempts.append(("pointer control", lambda: _pointer_open(driver, control)))
+    if combo is not None:
+        attempts.append(("actionchains combo", lambda: _ac_click(driver, combo)))
+        attempts.append(("pointer combo", lambda: _pointer_open(driver, combo)))
     if field is not None:
         attempts.append(("actionchains field", lambda: _ac_click(driver, field)))
-    if combo is not None:
-        attempts.append(("js keydown ArrowDown", lambda: driver.execute_script(
-            "arguments[0].focus();arguments[0].dispatchEvent(new KeyboardEvent('keydown',"
-            "{key:'ArrowDown',keyCode:40,which:40,bubbles:true}));", combo)))
 
     log = []
     for name, fn in attempts:
