@@ -93,9 +93,13 @@ def _reservation_pickups(driver, prop, report, download_dir, base, logger):
 
 
 def run_reservation(driver, prop, report, download_dir, today=None,
-                    dry_run=False, cfg=None, logger=None):
+                    dry_run=False, cfg=None, logger=None, snapshot_date=None):
     """Scrape /fr/reservation for the 3-day arrival window, build + POST the
-    reservation JSON. Returns (payload, result)."""
+    reservation JSON. Returns (payload, result).
+
+    snapshot_date (ISO 'YYYY-MM-DD'): stamp the payload's snapshotDate — used by the
+    section-D re-pull to target a specific day. The scheduled daily run leaves it
+    None, so the dashboard defaults snapshotDate to yesterday (WITA) as before."""
     cfg = cfg or config.UPLOAD
     cols = report["columns"]
     base = today or datetime.date.today()
@@ -140,7 +144,8 @@ def run_reservation(driver, prop, report, download_dir, today=None,
     # PICKUPS come from their own page ('Reservation By Creation Date', bookings
     # created yesterday) — NOT from these arrival rows, which group by arrival date.
     pickups = _reservation_pickups(driver, prop, report, download_dir, base, logger)
-    payload = dj.build_reservation_payload(prop["code"], pickups, arrivals)
+    payload = dj.build_reservation_payload(prop["code"], pickups, arrivals,
+                                           snapshot_date=snapshot_date)
 
     _log(logger, "    arrivals: {}".format(arrivals))
     _log(logger, "    pickups: {} agent(s)".format(len(pickups)))
@@ -149,8 +154,12 @@ def run_reservation(driver, prop, report, download_dir, today=None,
 
 
 def run_departure(driver, prop, report, download_dir, today=None,
-                  dry_run=False, cfg=None, logger=None):
+                  dry_run=False, cfg=None, logger=None, snapshot_date=None):
     """Build + POST the departure JSON for yesterday / today / tomorrow.
+
+    snapshot_date is accepted for a uniform dispatch signature but intentionally
+    NOT used: the /api/daily/departure contract reads dates from departures[] and
+    wants no snapshotDate.
 
     The telephone-operator 'To Date' picker only allows TODAY or later (past dates
     are disabled), so 'Expected Departure, To Date = T' means in-house guests
@@ -253,10 +262,11 @@ _RUNNERS = {
 
 
 def run(driver, prop, report, download_dir, today=None, dry_run=False,
-        cfg=None, logger=None):
-    """Run one DAILY_JSON_REPORTS entry by its kind. Returns (payload, result)."""
+        cfg=None, logger=None, snapshot_date=None):
+    """Run one DAILY_JSON_REPORTS entry by its kind. Returns (payload, result).
+    snapshot_date is forwarded to the runner (used by the section-D re-pull)."""
     fn = _RUNNERS.get(report.get("kind"))
     if fn is None:
         raise ValueError("unknown daily-json report kind: {!r}".format(report.get("kind")))
     return fn(driver, prop, report, download_dir, today=today,
-              dry_run=dry_run, cfg=cfg, logger=logger)
+              dry_run=dry_run, cfg=cfg, logger=logger, snapshot_date=snapshot_date)

@@ -34,6 +34,7 @@ import time
 import requests
 
 import config
+import daily_reports
 from browser import ensure_window, kill_stale_chromedrivers
 from runlock import RunLock
 from uploader import UploadError, upload
@@ -304,12 +305,180 @@ def _scrape_and_upload(logger, report, prop, job_id):
 
 
 # ---------------------------------------------------------------------------
+# section D — daily re-pull of ONE feed (or all four) for a snapshot day
+# ---------------------------------------------------------------------------
+# The dashboard only ever queues re-pulls for YESTERDAY (job.start = job.end =
+# yesterday WITA). We reproduce exactly what that morning's run would have posted:
+# run each feed with today = job.start + 1 (= now, since start is yesterday) and
+# stamp snapshotDate = job.start on the pickup + reservation pushes. Departure and
+# cancellation carry their dates in the body/file, so they get no snapshotDate.
+_SECTION_D_FEEDS = ("occupancy", "reservation", "departure", "cancellation")
+
+
+def _written_of(res):
+    """Rows the dashboard says it wrote for one push (0 if it doesn't report it)."""
+    if isinstance(res, dict):
+        try:
+            return int(res.get("written") or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _repull_one_feed(logger, driver, prop, feed, date):
+    """Re-pull ONE section-D feed for `date` (the snapshot day = yesterday) and push
+    it, reusing the SAME scrape + upload paths as the scheduled daily run. Returns
+    the dashboard's `written` count; raises on failure (the caller records it)."""
+    code = prop["code"]
+    snap = date.isoformat()
+    run_today = date + datetime.timedelta(days=1)   # today = job.start + 1 (confirmed)
+
+    if feed == "occupancy":
+        # Yearly occupancy -> /api/daily/pickup, NET of Compliment/House Use + revenue
+        # (the yearly-forecast-pickup report already does that). Stamp snapshotDate.
+        rep = dict(config.report_by_name("yearly-forecast-pickup"))
+        up = dict(rep["upload"])
+        up["extra_fields"] = dict(up.get("extra_fields") or {},
+                                  snapshotDate=snap, source="vhp:repull")
+        rep["upload"] = up
+        path = scrape_report(driver, prop, rep, config.DOWNLOADS_DIR)
+        return _written_of(upload(path, code, rep))
+
+    if feed == "cancellation":
+        # Cancellations for this exact day -> /api/daily/cancellation (raw CSV).
+        rep = dict(config.report_by_name("cancelled-reservation-guest"))
+        rep["period"] = {"start": snap, "end": snap}   # just the snapshot day
+        rep["period_required"] = True
+        up = dict(rep["upload"])
+        up["extra_fields"] = dict(up.get("extra_fields") or {}, source="vhp:repull")
+        rep["upload"] = up
+        path = scrape_report(driver, prop, rep, config.DOWNLOADS_DIR)
+        return _written_of(upload(path, code, rep))
+
+    if feed == "reservation":
+        rep = config.daily_json_report("reservation-daily")
+        _payload, res = daily_reports.run(
+            driver, prop, rep, config.DOWNLOADS_DIR,
+            today=run_today, snapshot_date=snap, logger=logger)
+        return _written_of(res)
+
+    if feed == "departure":
+        rep = config.daily_json_report("room-departure-daily")
+        _payload, res = daily_reports.run(   # departures[] carry dates -> no snapshotDate
+            driver, prop, rep, config.DOWNLOADS_DIR, today=run_today, logger=logger)
+        return _written_of(res)
+
+    raise ValueError("unknown feed {!r}".format(feed))
+
+
+def _repull_section_d(logger, prop, jid, feeds, date):
+    """Attach once, re-pull each requested feed for `date`, push each to its own
+    /api/daily/* endpoint. Returns (status, message, written). Never raises. A feed
+    that fails is recorded; if ANY feed failed the job is reported failed so the
+    dashboard re-queues it — every endpoint upserts per date, so a re-run is safe."""
+    tag = "{}#{}".format(prop["code"], jid)
+    try:
+        driver = ensure_window(prop, config.DOWNLOADS_DIR)
+    except Exception as exc:  # noqa: BLE001 - window closed AND couldn't be reopened
+        return ("failed",
+                "cannot attach to or reopen the {} Chrome window on port {} — is it "
+                "open (open-{}.bat) and logged into VHP? {}".format(
+                    prop["code"], prop.get("debug_port"), prop["code"], _describe(exc)),
+                0)
+    try:
+        ensure_logged_in(driver, prop, None,
+                         config.report_by_name("yearly-forecast-pickup")["url"])
+    except LoginRequired as exc:
+        return "failed", "the {} window isn't logged into VHP: {}".format(prop["code"], exc), 0
+
+    total = 0
+    done, failed = [], []
+    for feed in feeds:
+        try:
+            w = _repull_one_feed(logger, driver, prop, feed, date)
+            total += (w or 0)
+            done.append("{}={}".format(feed, w))
+            logger.info("[%s] re-pulled %s for %s -> written %s", tag, feed, date.isoformat(), w)
+        except LoginRequired as exc:
+            failed.append("{}: VHP session dropped — log in again ({})".format(feed, _describe(exc)))
+            logger.error("[%s] %s re-pull: session dropped", tag, feed)
+            break   # once logged out, the remaining feeds can't run either
+        except Exception as exc:  # noqa: BLE001 - isolate per-feed failures
+            failed.append("{}: {}".format(feed, _describe(exc)))
+            logger.exception("[%s] %s re-pull failed", tag, feed)
+    # No driver.quit() — leave the user's VHP window open for the next job.
+
+    scope = "/".join(feeds)
+    if failed:
+        return ("failed",
+                "re-pull {} for {}: ok [{}] FAILED [{}]".format(
+                    scope, date.isoformat(), ", ".join(done) or "none", "; ".join(failed)),
+                total)
+    return ("done",
+            "re-pulled {} for {} ({})".format(scope, date.isoformat(), ", ".join(done)),
+            total)
+
+
+def _process_section_d(logger, cfg, job):
+    """Daily re-pull job: validate (no Chrome), then take the lock and re-pull the
+    requested feed (or all four) for the snapshot day, pushing each to /api/daily/*."""
+    jid = job.get("id")
+    prop = _find_property(job.get("property") or job.get("property_code"))
+    if prop is None:
+        report_result(logger, cfg, jid, "failed",
+                      "unknown property {!r}".format(job.get("property")), None)
+        logger.info("job %s -> failed (unknown property)", jid)
+        return
+    start = job.get("start") or job.get("end") or job.get("date")
+    try:
+        date = _parse_iso(start)
+    except Exception as exc:  # noqa: BLE001
+        report_result(logger, cfg, jid, "failed",
+                      "section D needs 'start' as YYYY-MM-DD (got {!r}): {}".format(
+                          start, _describe(exc)), None)
+        logger.info("job %s -> failed (bad date)", jid)
+        return
+    feed = (job.get("feed") or "").strip().lower()
+    if feed and feed not in _SECTION_D_FEEDS:
+        report_result(logger, cfg, jid, "failed",
+                      "unknown feed {!r} (expected one of {}, or null for all)".format(
+                          feed, ", ".join(_SECTION_D_FEEDS)), None)
+        logger.info("job %s -> failed (unknown feed %r)", jid, feed)
+        return
+    feeds = [feed] if feed else list(_SECTION_D_FEEDS)
+
+    logger.info("claimed job %s: %s section D re-pull %s for %s",
+                jid, prop["code"].upper(), feed or "ALL", date.isoformat())
+
+    lock = RunLock(config.RUN_LOCK_PATH)
+    if not lock.acquire(wait=_LOCK_WAIT):
+        logger.error("job %s: another VHP run held Chrome too long — reporting failed", jid)
+        report_result(logger, cfg, jid, "failed",
+                      "the office PC was busy with another VHP run for too long — "
+                      "please re-request this re-pull", None)
+        return
+    try:
+        kill_stale_chromedrivers()
+        lock.refresh()
+        status, message, written = _repull_section_d(logger, prop, jid, feeds, date)
+    finally:
+        lock.release()
+    report_result(logger, cfg, jid, status, message, {"written": written})
+    logger.info("job %s -> %s (%s)", jid, status, message)
+
+
+# ---------------------------------------------------------------------------
 # the loop
 # ---------------------------------------------------------------------------
 def _process_one(logger, cfg, job):
     """Validate the job, then (only if it needs Chrome) take the lock, scrape,
     and report the result."""
     jid = job.get("id")
+    # Section D = a daily re-pull of one feed (or all four) to /api/daily/* — a
+    # different scrape+push shape than the B/C CSV-to-/api/import path below.
+    if (job.get("section") or "").strip().upper() == "D":
+        _process_section_d(logger, cfg, job)
+        return
     # Validate FIRST — no Chrome, no lock. A bad/unsupported job (unknown section
     # or property, bad dates, a gated-off past-month B) fails instantly with the
     # real reason, instead of waiting out the lock and taskkilling chromedrivers.

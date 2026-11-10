@@ -491,6 +491,13 @@ def report_by_section(section):
     return None
 
 
+def report_by_name(name):
+    """Return the REPORTS entry with this exact `name`, or None. Needed where a
+    section letter is ambiguous (several reports share section 'D') — e.g. the
+    section-D daily re-pull maps a feed to a specific report by name."""
+    return next((r for r in REPORTS if r.get("name") == name), None)
+
+
 def get_credentials(code):
     """Return (username, password) for a property code, or None if unset."""
     entry = _CREDS.get(code, {})
