@@ -2508,12 +2508,29 @@ def dump_segment_options(driver):
             return ["(Segment Code control [data-cy={}] not found on this page)".format(_SEGMENT_CY)]
         _safe_click(driver, field)
         for _ in range(15):
-            if driver.find_elements(By.CSS_SELECTOR, ".q-menu .q-item"):
+            if driver.find_elements(By.CSS_SELECTOR, ".q-menu .q-item, .q-menu [role='option']"):
                 break
             time.sleep(0.2)
         seen = _collect_menu_labels(driver)
+        if seen:
+            _close_overlays(driver)
+            return seen
+        # No labels via .q-item__label — dump the open menu's RAW structure so we can
+        # see how VHP actually builds the options, then fix the selectors.
+        diag = driver.execute_script(r"""
+          var out=[], menus=document.querySelectorAll('.q-menu');
+          out.push('q-menu count='+menus.length);
+          for(var i=0;i<menus.length;i++){var m=menus[i],r=m.getBoundingClientRect();
+            out.push('MENU'+i+' vis='+(r.width>0&&r.height>0)+' H='+(m.outerHTML||'').replace(/\s+/g,' ').slice(0,1500));}
+          var sels=['.q-menu .q-item','.q-menu [role=option]','.q-menu .q-item__label','.q-menu .q-item__section','.q-menu li','.q-menu label'];
+          for(var s=0;s<sels.length;s++){out.push(sels[s]+' -> '+document.querySelectorAll(sels[s]).length);}
+          var any=document.querySelectorAll('.q-menu *');
+          for(var k=0;k<Math.min(any.length,6);k++){var t=(any[k].textContent||'').trim();
+            if(t&&t.length<30)out.push('TXT '+any[k].tagName+'.'+(any[k].className||'')+' = '+t);}
+          return out.join('\n');
+        """)
         _close_overlays(driver)
-        return seen or ["(menu opened but no option labels found)"]
+        return ["(no labels via .q-item__label — RAW MENU DUMP:)", diag or "(no .q-menu found)"]
     except Exception as exc:  # noqa: BLE001
         return ["(error: {})".format(_describe(exc))]
 
