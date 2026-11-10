@@ -2578,16 +2578,27 @@ def _open_segment_menu(driver):
         except Exception:  # noqa: BLE001
             return []
 
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    def _focus_key(key):
+        # focus the combobox, then send a REAL (trusted) keystroke with no mouse
+        # move — sidesteps both the out-of-bounds AND the ignore-synthetic problem.
+        driver.execute_script("arguments[0].focus();", combo)
+        time.sleep(0.2)
+        ActionChains(driver).send_keys(key).perform()
+
     attempts = []
+    if combo is not None:
+        attempts.append(("focus+key Enter", lambda: _focus_key(Keys.ENTER)))
+        attempts.append(("focus+key ArrowDown", lambda: _focus_key(Keys.ARROW_DOWN)))
+        attempts.append(("focus+key Space", lambda: _focus_key(Keys.SPACE)))
     if native is not None:
         attempts.append(("actionchains native", lambda: _ac_click(driver, native)))
         attempts.append(("pointer native", lambda: _pointer_open(driver, native)))
     if control is not None:
         attempts.append(("actionchains control", lambda: _ac_click(driver, control)))
-        attempts.append(("pointer control", lambda: _pointer_open(driver, control)))
     if combo is not None:
         attempts.append(("actionchains combo", lambda: _ac_click(driver, combo)))
-        attempts.append(("pointer combo", lambda: _pointer_open(driver, combo)))
     if field is not None:
         attempts.append(("actionchains field", lambda: _ac_click(driver, field)))
 
