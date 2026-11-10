@@ -2498,39 +2498,75 @@ def _collect_menu_labels(driver):
     return seen
 
 
+_SEG_OPTS_JS = r"""
+  var owns=arguments[0], out=[], seen={};
+  var roots=[].slice.call(document.querySelectorAll('.q-menu'));
+  if(owns){var lb=document.getElementById(owns); if(lb)roots.push(lb);}
+  roots.forEach(function(root){
+    var items=root.querySelectorAll('.q-item,[role=option],li');
+    for(var i=0;i<items.length;i++){var t=(items[i].textContent||'').trim();
+      if(t&&t.length<40&&!(t in seen)){seen[t]=1;out.push(t);}}
+  });
+  return out;
+"""
+
+
+def _segment_combo(driver):
+    """The focusable role=combobox element inside the Segment Code field."""
+    return next((c for c in driver.find_elements(
+        By.CSS_SELECTOR, "[data-cy='{}'] [role='combobox']".format(_SEGMENT_CY))), None)
+
+
+def _open_segment_menu(driver):
+    """Open the Segment Code dropdown and return (combo, aria_owns) once options are
+    showing, or (combo, owns) anyway after trying each method. VHP's multi-select
+    doesn't open on a plain wrapper click, so try the combobox click + keys, and
+    read options from BOTH .q-menu and the aria-owns listbox."""
+    combo = _segment_combo(driver)
+    field = _find_segment_field(driver)
+    owns = (combo.get_attribute("aria-owns") if combo else "") or ""
+
+    def _opts():
+        try:
+            return driver.execute_script(_SEG_OPTS_JS, owns) or []
+        except Exception:  # noqa: BLE001
+            return []
+
+    methods = []
+    if combo is not None:
+        methods += [("click combo", lambda: _safe_click(driver, combo)),
+                    ("combo ArrowDown", lambda: combo.send_keys(Keys.ARROW_DOWN)),
+                    ("combo Enter", lambda: combo.send_keys(Keys.ENTER)),
+                    ("combo Space", lambda: combo.send_keys(Keys.SPACE))]
+    if field is not None:
+        methods.append(("click field", lambda: _safe_click(driver, field)))
+    log = []
+    for name, fn in methods:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001
+            log.append("{}: click err {}".format(name, _describe(exc)))
+            continue
+        time.sleep(0.9)
+        opts = _opts()
+        exp = (combo.get_attribute("aria-expanded") if combo else "?")
+        log.append("{}: expanded={} qmenu={} opts={}".format(
+            name, exp, len(driver.find_elements(By.CSS_SELECTOR, ".q-menu")), len(opts)))
+        if opts:
+            return combo, owns, opts, log
+    return combo, owns, [], log
+
+
 def dump_segment_options(driver):
-    """Open the Segment Code multi-select and return ALL its option labels (scrolling
-    the virtual list), so segment_untick can be tuned to the EXACT VHP labels.
-    Never raises; returns a list of strings."""
+    """Open the Segment Code multi-select and return its option labels. Probes
+    several open methods (VHP's dropdown is non-standard) and reads options from the
+    .q-menu AND the aria-owns listbox. Never raises; returns a list of strings."""
     try:
-        field = _find_segment_field(driver)
-        if field is None:
-            return ["(Segment Code control [data-cy={}] not found on this page)".format(_SEGMENT_CY)]
-        _safe_click(driver, field)
-        for _ in range(15):
-            if driver.find_elements(By.CSS_SELECTOR, ".q-menu .q-item, .q-menu [role='option']"):
-                break
-            time.sleep(0.2)
-        seen = _collect_menu_labels(driver)
-        if seen:
-            _close_overlays(driver)
-            return seen
-        # No labels via .q-item__label — dump the open menu's RAW structure so we can
-        # see how VHP actually builds the options, then fix the selectors.
-        diag = driver.execute_script(r"""
-          var out=[], menus=document.querySelectorAll('.q-menu');
-          out.push('q-menu count='+menus.length);
-          for(var i=0;i<menus.length;i++){var m=menus[i],r=m.getBoundingClientRect();
-            out.push('MENU'+i+' vis='+(r.width>0&&r.height>0)+' H='+(m.outerHTML||'').replace(/\s+/g,' ').slice(0,1500));}
-          var sels=['.q-menu .q-item','.q-menu [role=option]','.q-menu .q-item__label','.q-menu .q-item__section','.q-menu li','.q-menu label'];
-          for(var s=0;s<sels.length;s++){out.push(sels[s]+' -> '+document.querySelectorAll(sels[s]).length);}
-          var any=document.querySelectorAll('.q-menu *');
-          for(var k=0;k<Math.min(any.length,6);k++){var t=(any[k].textContent||'').trim();
-            if(t&&t.length<30)out.push('TXT '+any[k].tagName+'.'+(any[k].className||'')+' = '+t);}
-          return out.join('\n');
-        """)
+        _combo, _owns, opts, log = _open_segment_menu(driver)
         _close_overlays(driver)
-        return ["(no labels via .q-item__label — RAW MENU DUMP:)", diag or "(no .q-menu found)"]
+        if opts:
+            return opts
+        return ["(could not open/enumerate the Segment menu — probe log:)"] + log
     except Exception as exc:  # noqa: BLE001
         return ["(error: {})".format(_describe(exc))]
 
