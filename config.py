@@ -535,7 +535,12 @@ CAPTCHA_MIN_VOTES = 3              # how many preprocessings must agree to auto-
 # Trained-CNN reader (captcha_cnn.npz). The CNN gives a confidence (lowest per-digit
 # softmax prob); the bot SUBMITS only at/above this, else it refreshes the CAPTCHA
 # (no login attempt). Raise toward 0.99 to submit less often but even more safely.
-CAPTCHA_CNN_MIN_CONF = 0.97
+CAPTCHA_CNN_MIN_CONF = 0.99   # held-out: 100% correct among >=0.99 reads (safest).
+                              # Lower toward 0.97 to submit more often (~97% correct).
+CAPTCHA_SOLVE_TRIES = 6       # on a logout, read up to N CAPTCHAs (refreshing the
+                              # image between — NO submit) until one is confident,
+                              # then submit that one. ~38% are confident per read, so
+                              # 6 tries ~= 95% chance of an auto-login without a human.
 AUTO_CAPTCHA_KILL_FILE = os.path.join(LOGS_DIR, ".no_auto_captcha")
 
 

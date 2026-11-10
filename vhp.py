@@ -465,6 +465,48 @@ def _captcha_reset(prop):
         _cap_state_write(prop, dict(_CAP_FRESH))
 
 
+def _refresh_captcha(driver):
+    """Click VHP's small round refresh-CAPTCHA button (just LEFT of the digit
+    canvas) to load a NEW CAPTCHA — WITHOUT reloading the page (keeps the filled
+    login) and WITHOUT submitting. Returns True only if a new CAPTCHA appeared.
+    Best-effort and safe: it never clicks a wide button (the LOG IN bar), only a
+    small control on the CAPTCHA's own row and to its left; if it can't find one,
+    it does nothing (the caller then just hands off)."""
+    try:
+        import captcha
+        canvas = captcha._find_captcha_image(driver)
+        if canvas is None:
+            return False
+        cx = (canvas.location or {}).get("x", 0)
+        cmid = (canvas.location or {}).get("y", 0) + (canvas.size or {}).get("height", 40) / 2.0
+        prev = captcha.canvas_png(driver, canvas)
+        target = None
+        for b in driver.find_elements(By.CSS_SELECTOR, "button, .q-btn, [role='button']"):
+            try:
+                if not b.is_displayed():
+                    continue
+                bw = (b.size or {}).get("width", 0)
+                bx = (b.location or {}).get("x", 0)
+                bmid = (b.location or {}).get("y", 0) + (b.size or {}).get("height", 0) / 2.0
+                # small, same row, just to the LEFT of the digit canvas (the ↻ icon)
+                if 0 < bw <= 60 and cx - 90 < bx < cx and abs(bmid - cmid) <= 28:
+                    target = b
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        if target is None:
+            return False
+        _safe_click(driver, target)
+        for _ in range(12):   # wait until the canvas pixels actually change
+            time.sleep(0.3)
+            now = captcha.canvas_png(driver, captcha._find_captcha_image(driver) or canvas)
+            if now and now != prev:
+                return True
+        return False
+    except Exception:  # noqa: BLE001 - refresh is best-effort; never raises
+        return False
+
+
 def attempt_auto_login(driver, prop, recovery, logger=None):
     """Best-effort: when the BOT'S OWN recovery brought the window to VHP's login
     page, OCR the CAPTCHA and log in. Returns True ONLY if a positive logged-in page
@@ -497,9 +539,15 @@ def attempt_auto_login(driver, prop, recovery, logger=None):
     if reason:
         _log(reason)
         return False
-    if not captcha.ocr_available():
-        _log("OCR not installed ({}) — run `pip install pytesseract pillow` + the "
-             "Tesseract engine to enable it".format(captcha.ocr_unavailable_reason()))
+    _cnn_ok = False
+    try:
+        import captcha_cnn
+        _cnn_ok = captcha_cnn.available()
+    except Exception:  # noqa: BLE001
+        _cnn_ok = False
+    if not _cnn_ok and not captcha.ocr_available():
+        _log("no CAPTCHA reader available — add captcha_cnn.npz (the trained model) "
+             "or install Tesseract (`pip install pytesseract pillow`)")
         return False
 
     # Wait briefly for the login form + CAPTCHA box (after an OK click the redirect
@@ -557,9 +605,25 @@ def attempt_auto_login(driver, prop, recovery, logger=None):
         _clear_fields(filled)
         return False
 
-    digits = captcha.solve_captcha(driver, config.CAPTCHA_MIN_LEN, config.CAPTCHA_MAX_LEN)
+    # Read the CAPTCHA; if not confident, REFRESH it (new image — no submit, so no
+    # failed login) and read again, a few times, so we only ever submit a confident
+    # read. Refreshing is free; the breaker + cooldown still gate the real submit.
+    digits = None
+    tries = max(1, int(getattr(config, "CAPTCHA_SOLVE_TRIES", 6)))
+    for _attempt in range(tries):
+        if _box_has_text():
+            _log("a human is typing the CAPTCHA — backing off (no submit)")
+            _clear_fields(filled)
+            return False
+        digits = captcha.solve_captcha(driver, config.CAPTCHA_MIN_LEN, config.CAPTCHA_MAX_LEN)
+        if digits:
+            break
+        if _attempt < tries - 1 and _refresh_captcha(driver):
+            continue
+        break
     if not digits:
-        _log("CAPTCHA not read confidently — handing to a human (NO attempt made)")
+        _log("CAPTCHA not read confidently in {} tr{} — handing to a human".format(
+            tries, "y" if tries == 1 else "ies"))
         _clear_fields(filled)
         return False
 
