@@ -77,6 +77,10 @@ def main(argv):
     parser.add_argument("--segments", action="store_true",
                         help="dump ALL 'Segment Code' option labels (to tune "
                              "segment_untick to the exact VHP names)")
+    parser.add_argument("--diagseg", action="store_true",
+                        help="DIAGNOSE why the de-select doesn't reach the export: "
+                             "record the SEARCH request body + segment states before/"
+                             "after SEARCH, then export and report the result")
     args = parser.parse_args(argv)
 
     if args.url:
@@ -110,6 +114,63 @@ def main(argv):
         gentle = args.tables and not args.search and not args.export
         vhp.open_report(driver, report, require_search=not gentle)
         time.sleep(2.5)  # let the filter panel hydrate
+
+        if args.diagseg:
+            print("\n===== SEGMENT DE-SELECT DIAGNOSTIC =====")
+            print("recorder: {}".format(vhp.install_request_recorder(driver)))
+            print("panel:    {}".format(vhp._ensure_filter_panel_open(driver)))
+            vhp.set_period(driver, report)   # set the Month exactly like the daily push
+            print("segment value (fresh):           {!r}".format(vhp._segment_value(driver)))
+
+            labels = report.get("segment_untick") or ["COMPLIMENT", "HOUSE USE"]
+            try:
+                vhp._segment_untick(driver, labels)
+            except Exception as exc:  # noqa: BLE001
+                print("de-select ERR: {}".format(vhp._describe(exc)))
+            print("segment value (after de-select): {!r}".format(vhp._segment_value(driver)))
+
+            # Clear the buffer so only the SEARCH-triggered requests remain, then search.
+            vhp.clear_recorded_requests(driver)
+            print("segment value (just before SEARCH): {!r}".format(vhp._segment_value(driver)))
+            vhp.click_search(driver)
+            vhp.wait_for_report_data(driver)
+            time.sleep(1.0)
+            print("segment value (after SEARCH):    {!r}".format(vhp._segment_value(driver)))
+
+            print("\n----- SEARCH request(s) captured (look for the segment filter) -----")
+            for line in vhp.dump_recorded_requests(driver):
+                print("  " + line)
+
+            # Export FIRST (before any menu re-open can perturb state), report the CSV.
+            print("\n----- exporting to correlate with the request above -----")
+            try:
+                for _cmd in ("Browser.setDownloadBehavior", "Page.setDownloadBehavior"):
+                    try:
+                        driver.execute_cdp_cmd(_cmd, {"behavior": "allow",
+                                                      "downloadPath": config.DOWNLOADS_DIR})
+                    except Exception:  # noqa: BLE001
+                        pass
+                before = vhp.snapshot_dirs(config.DOWNLOAD_WATCH)
+                since = time.time()
+                vhp.export_print_csv(driver)
+                raw = vhp.wait_for_download(config.DOWNLOAD_WATCH, before=before, since=since)
+                dest = vhp.rename_download(raw, prop["code"], "diagseg", config.DOWNLOADS_DIR)
+                print("SAVED: {}".format(dest))
+            except Exception as exc:  # noqa: BLE001
+                print("export ERR: {}".format(vhp._describe(exc)))
+
+            # Finally, reopen the menu to see whether SEARCH reset the de-select.
+            try:
+                m = vhp.segment_checked_map(driver)
+                keep = {k: v for k, v in m.items()
+                        if k.upper() in ("ALL", "COMPLIMENT", "HOUSE USE") or v is False}
+                print("\nsegment checked-state AFTER search (All/Compliment/House Use + any still-off): {}"
+                      .format(keep or m))
+            except Exception as exc:  # noqa: BLE001
+                print("checked-map ERR: {}".format(vhp._describe(exc)))
+
+            print("\n----- diagseg done (nothing uploaded). Send me ALL of the above. -----")
+            return 0
 
         if args.display:
             # Switch a 'Display' dropdown (telephone-operator) to a given view

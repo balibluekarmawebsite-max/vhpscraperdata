@@ -2751,6 +2751,107 @@ def dump_segment_options(driver):
         return ["(error: {})".format(_describe(exc))]
 
 
+# --- Segment de-select DIAGNOSTIC ----------------------------------------
+# The UI shows the segments deselected (checkbox True->False, field shows the net
+# list) but the exported "Room Occupied" stays GROSS. To see whether the filter
+# actually reaches the backend, record every request's URL + body (works on an
+# attached session, no CDP events needed) so we can read the SEARCH request.
+_REQ_RECORDER_JS = r"""
+  if (window.__vhpRecOn) return 'already-installed';
+  window.__vhpRecOn = true;
+  window.__vhpReqs = [];
+  try {
+    var of = window.fetch;
+    if (of) window.fetch = function(){
+      try { var u=arguments[0], o=arguments[1]||{};
+        window.__vhpReqs.push({t:'fetch', m:(o.method||'GET'),
+          url:((u&&u.url)||u||'')+'', body:(o.body!=null?(''+o.body):null)}); } catch(e){}
+      return of.apply(this, arguments);
+    };
+  } catch(e){}
+  try {
+    var XP = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
+    if (XP) {
+      var oo = XP.open, os = XP.send;
+      XP.open = function(m,u){ try{ this.__m=m; this.__u=u; }catch(e){} return oo.apply(this, arguments); };
+      XP.send = function(b){ try{ window.__vhpReqs.push({t:'xhr', m:(this.__m||''),
+          url:(this.__u||'')+'', body:(b!=null?(''+b):null)}); }catch(e){}
+        return os.apply(this, arguments); };
+    }
+  } catch(e){}
+  return 'installed';
+"""
+
+
+def install_request_recorder(driver):
+    """Patch window.fetch + XMLHttpRequest so every request's URL+body lands in
+    window.__vhpReqs. Call once BEFORE pressing SEARCH; survives the SPA's own XHRs
+    (axios uses XMLHttpRequest, so the prototype patch catches it)."""
+    try:
+        return driver.execute_script(_REQ_RECORDER_JS)
+    except Exception as exc:  # noqa: BLE001
+        return "recorder ERR {}".format(_describe(exc))
+
+
+def clear_recorded_requests(driver):
+    """Empty the recorder buffer (so a later dump shows only new requests)."""
+    try:
+        driver.execute_script("if(window.__vhpReqs)window.__vhpReqs.length=0;return 1;")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def dump_recorded_requests(driver, needles=("report", "occupancy", "vhp-node6", "rest",
+                                            "forecast", "vhpss", "prepare", "segment", "search")):
+    """Recorded requests whose URL OR body mentions a needle (case-insensitive),
+    as 'METHOD url | body='. If none match, fall back to the last 10 captured."""
+    try:
+        reqs = driver.execute_script("return window.__vhpReqs || [];") or []
+    except Exception as exc:  # noqa: BLE001
+        return ["(read ERR {})".format(_describe(exc))]
+    nd = [n.lower() for n in needles]
+
+    def _fmt(r):
+        u = (r.get("url") or "")
+        b = (r.get("body") or "")
+        return "{} {} | body={}".format((r.get("m") or r.get("t") or "").upper(),
+                                        u[:500], (b[:1500] if b else "(none)"))
+
+    hits = [r for r in reqs
+            if any(n in ((r.get("url") or "") + " " + (r.get("body") or "")).lower() for n in nd)]
+    if hits:
+        return [_fmt(r) for r in hits]
+    return ["(no request matched {}; last {} of {} captured:)".format(
+        list(needles), min(10, len(reqs)), len(reqs))] + [_fmt(r) for r in reqs[-10:]]
+
+
+def segment_checked_map(driver):
+    """Reopen the Segment menu read-only and return {label: checked_bool} for every
+    option, then close. Use to see whether COMPLIMENT/HOUSE USE stay deselected after
+    SEARCH (i.e. whether SEARCH reset the model)."""
+    _open_segment_menu(driver)
+    out = {}
+    for it in driver.find_elements(By.CSS_SELECTOR, ".q-menu .q-item"):
+        try:
+            labs = it.find_elements(By.CSS_SELECTOR, ".q-item__label")
+            if not labs:
+                continue
+            name = " ".join((labs[0].text or labs[0].get_attribute("textContent") or "").split())
+            if name:
+                out[name] = _seg_item_checked(it)
+        except Exception:  # noqa: BLE001
+            continue
+    for _ in range(3):
+        try:
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.2)
+        if not any(_disp_safe(m) for m in driver.find_elements(By.CSS_SELECTOR, ".q-menu")):
+            break
+    return out
+
+
 def _find_option(driver, label):
     """Find a dropdown option whose q-item label EXACTLY equals `label`,
     sweeping the open menu's real scrollable list (virtual scroll) top-to-bottom.
