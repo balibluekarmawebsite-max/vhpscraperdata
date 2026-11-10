@@ -2314,6 +2314,29 @@ def _set_checkbox(driver, label, want):
 _SEGMENT_CY = "dropdown-segment-code"
 
 
+def _find_segment_field(driver, wait=10):
+    """The CLICKABLE Segment Code control. VHP puts the data-cy on an inner
+    q-field__native div that Selenium frequently reports as NOT displayed, which made
+    the old finder raise 'not found' and silently skip the de-select (so the export
+    came out gross). Return the enclosing .q-field / .q-select label instead — it is
+    clickable and reliably 'displayed'. Waits briefly for the filter panel to render;
+    returns None only if the control truly isn't on the page."""
+    end = time.time() + wait
+    while time.time() < end:
+        cells = driver.find_elements(By.CSS_SELECTOR, "[data-cy='{}']".format(_SEGMENT_CY))
+        if cells:
+            cell = cells[0]
+            for xp in ("ancestor-or-self::label[contains(concat(' ',normalize-space(@class),' '),' q-field ')][1]",
+                       "ancestor-or-self::*[contains(concat(' ',normalize-space(@class),' '),' q-select ')][1]"):
+                try:
+                    return cell.find_element(By.XPATH, xp)
+                except Exception:  # noqa: BLE001 - try the next ancestor pattern
+                    continue
+            return cell  # last resort: the native div itself
+        time.sleep(0.4)
+    return None
+
+
 def _segment_value(driver):
     """The Segment Code field's shown value (e.g. 'ALL' or 'FIT, FIT-OTA, …')."""
     for css in (
@@ -2321,10 +2344,12 @@ def _segment_value(driver):
         "[data-cy='{}']".format(_SEGMENT_CY),
     ):
         for el in driver.find_elements(By.CSS_SELECTOR, css):
-            if el.is_displayed():
+            try:  # textContent works even when Selenium reports the div not-displayed
                 txt = (el.text or el.get_attribute("textContent") or "").strip()
-                if txt:
-                    return txt
+            except Exception:  # noqa: BLE001
+                continue
+            if txt:
+                return txt
     return ""
 
 
@@ -2335,11 +2360,7 @@ def _segment_untick(driver, exclude_labels):
     selected (deterministic start), then de-selects each excluded option. The
     list is virtually scrolled, so options are found by scrolling the menu.
     """
-    field = None
-    for el in driver.find_elements(By.CSS_SELECTOR, "[data-cy='{}']".format(_SEGMENT_CY)):
-        if el.is_displayed():
-            field = el
-            break
+    field = _find_segment_field(driver)
     if field is None:
         raise RuntimeError("Segment Code field (data-cy) not found")
 
@@ -2482,8 +2503,7 @@ def dump_segment_options(driver):
     the virtual list), so segment_untick can be tuned to the EXACT VHP labels.
     Never raises; returns a list of strings."""
     try:
-        field = next((el for el in driver.find_elements(
-            By.CSS_SELECTOR, "[data-cy='{}']".format(_SEGMENT_CY)) if _disp_safe(el)), None)
+        field = _find_segment_field(driver)
         if field is None:
             return ["(Segment Code control [data-cy={}] not found on this page)".format(_SEGMENT_CY)]
         _safe_click(driver, field)
