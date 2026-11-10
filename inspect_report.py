@@ -166,7 +166,7 @@ def main(argv):
                   "/ arrival / departure date) to the JSON the dashboard wants.")
 
         if args.export:
-            print("\n===== SAMPLE CSV (press SEARCH + export; NOT uploaded) =====")
+            print("\n===== SAMPLE CSV via the FULL daily pipeline (scrape_report; NOT uploaded) =====")
             try:
                 # Re-assert the download dir (navigation can reset it).
                 for _cmd in ("Browser.setDownloadBehavior", "Page.setDownloadBehavior"):
@@ -175,20 +175,15 @@ def main(argv):
                                                       "downloadPath": config.DOWNLOADS_DIR})
                     except Exception:  # noqa: BLE001
                         pass
-                vhp.configure_report(driver, report)      # no-op unless the report has filters
-                vhp.click_search(driver)
-                vhp.wait_for_report_data(driver)
-                time.sleep(1)
-                before = vhp.snapshot_dirs(config.DOWNLOAD_WATCH)
-                since = time.time()
-                vhp.export_print_csv(driver)
-                raw = vhp.wait_for_download(config.DOWNLOAD_WATCH, before=before, since=since)
-                dest = vhp.rename_download(raw, prop["code"], "sample-inspect", config.DOWNLOADS_DIR)
+                # Run the EXACT pipeline the 6am push uses: set the Month, apply the
+                # Segment de-select, SEARCH, then export — so "Room Occupied" here is
+                # what the dashboard would receive.
+                dest = vhp.scrape_report(driver, prop, report, config.DOWNLOADS_DIR)
                 print("SAVED (not uploaded): {}".format(dest))
-                print("Open that CSV and send it to me — I'll read the columns for the config + "
-                      "your dashboard agent's parser.")
+                print("Open that CSV and send it to me — Room Occupied for Nov should now "
+                      "be the NET figure (343), not 355.")
             except Exception as exc:  # noqa: BLE001
-                print("export failed: {}".format(vhp._describe(exc)))
+                print("scrape failed: {}".format(vhp._describe(exc)))
     finally:
         lock.release()
     print("\n----- done (nothing was uploaded; VHP unchanged). Send me everything above. -----")
