@@ -62,6 +62,9 @@ return out.slice(0, 60).join('\n');
 def main(argv):
     parser = argparse.ArgumentParser(description="Inspect a VHP report's filter/date controls.")
     parser.add_argument("section", nargs="?", help="existing section to inspect: B or C")
+    parser.add_argument("--name", help="inspect a REPORTS entry by its exact name "
+                                       "(e.g. yearly-forecast-pickup) — needed when several "
+                                       "reports share a section letter")
     parser.add_argument("--url", help="inspect ANY report by URL (for a report not yet in config)")
     parser.add_argument("--code", default="bkds", help="which property window to use (default bkds)")
     parser.add_argument("--export", action="store_true",
@@ -85,13 +88,21 @@ def main(argv):
 
     if args.url:
         report = {"name": "adhoc-inspect", "url": args.url, "section": None}
+    elif args.name:
+        report = next((r for r in config.REPORTS
+                       if (r.get("name") or "").lower() == args.name.lower()), None)
+        if report is None:
+            print("no report named {!r}. Known names: {}".format(
+                args.name, ", ".join(r.get("name", "?") for r in config.REPORTS)))
+            return 2
     elif args.section:
         report = config.report_by_section(args.section.upper())
         if report is None:
             print("no report for section {!r} (use B or C, or pass --url)".format(args.section))
             return 2
     else:
-        print("usage: inspect_report.py <B|C>   OR   inspect_report.py --url <report-url> [--export]")
+        print("usage: inspect_report.py <B|C>   OR   inspect_report.py --name <report-name>   "
+              "OR   inspect_report.py --url <report-url> [--export]")
         return 2
 
     prop = next((p for p in config.PROPERTIES if p["code"].lower() == args.code.lower()), None)
