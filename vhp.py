@@ -2399,11 +2399,7 @@ def _segment_untick(driver, exclude_labels):
     open menu is a .q-menu listbox of .q-item rows, each a role=checkbox plus a
     .q-item__label carrying the segment name.
     """
-    try:
-        driver.set_window_size(1600, 1200)
-        time.sleep(0.3)
-    except Exception:  # noqa: BLE001
-        pass
+    _maximize(driver)   # fit the window to the screen so controls are clickable
 
     _combo, _owns, opts, log = _open_segment_menu(driver)
     if not opts:
@@ -2526,17 +2522,25 @@ def _segment_combo(driver):
         By.CSS_SELECTOR, "[data-cy='{}'] [role='combobox']".format(_SEGMENT_CY))), None)
 
 
-def _vp_prepare(driver, el):
-    """Make the window tall and scroll `el` to center, so a real click can reach it
-    (the filter panel sits below the fold on a short window -> out-of-bounds)."""
+def _maximize(driver):
+    """Fit the window to the SCREEN (not an oversized window, which pushes controls
+    off-screen -> out-of-bounds). Mirrors maximizing by hand, which works."""
     try:
         info = driver.execute_cdp_cmd("Browser.getWindowForTarget", {})
         if (info.get("bounds") or {}).get("windowState") not in ("maximized", "fullscreen"):
-            driver.execute_cdp_cmd("Browser.setWindowBounds", {
-                "windowId": info.get("windowId"),
-                "bounds": {"width": 1400, "height": 1100, "windowState": "normal"}})
+            driver.maximize_window()
+            time.sleep(0.4)
     except Exception:  # noqa: BLE001
-        pass
+        try:
+            driver.maximize_window()
+            time.sleep(0.4)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _vp_prepare(driver, el):
+    """Maximize the window and scroll `el` to center, so a real click can reach it."""
+    _maximize(driver)
     try:
         driver.execute_script("arguments[0].scrollIntoView({block:'center',inline:'center'});", el)
         time.sleep(0.3)
@@ -2571,11 +2575,7 @@ def _open_segment_menu(driver):
     multi-select ignores synthetic clicks, so try a REAL ActionChains click and the
     full JS mouse-event sequence on the combobox / native div, plus a JS keydown,
     reading options from BOTH .q-menu and the aria-owns listbox."""
-    try:  # a big window so the control + options are on-screen for a real click
-        driver.set_window_size(1600, 1200)
-        time.sleep(0.3)
-    except Exception:  # noqa: BLE001
-        pass
+    _maximize(driver)   # fit the window to the screen so controls are clickable
     combo = _segment_combo(driver)
     field = _find_segment_field(driver)
     native = next((n for n in driver.find_elements(

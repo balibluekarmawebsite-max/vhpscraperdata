@@ -175,13 +175,21 @@ def main(argv):
                                                       "downloadPath": config.DOWNLOADS_DIR})
                     except Exception:  # noqa: BLE001
                         pass
-                # Run the EXACT pipeline the 6am push uses: set the Month, apply the
-                # Segment de-select, SEARCH, then export — so "Room Occupied" here is
-                # what the dashboard would receive.
-                dest = vhp.scrape_report(driver, prop, report, config.DOWNLOADS_DIR)
+                # Same steps the 6am push uses, on the already-open page (no
+                # re-navigation): set the Month, apply the Segment de-select, SEARCH,
+                # then export -- so "Room Occupied" here is what the dashboard receives.
+                vhp.set_period(driver, report)          # set the Month
+                vhp.configure_report(driver, report)    # Segment de-select
+                vhp.click_search(driver)
+                vhp.wait_for_report_data(driver)
+                time.sleep(1)
+                before = vhp.snapshot_dirs(config.DOWNLOAD_WATCH)
+                since = time.time()
+                vhp.export_print_csv(driver)
+                raw = vhp.wait_for_download(config.DOWNLOAD_WATCH, before=before, since=since)
+                dest = vhp.rename_download(raw, prop["code"], "sample-inspect", config.DOWNLOADS_DIR)
                 print("SAVED (not uploaded): {}".format(dest))
-                print("Open that CSV and send it to me — Room Occupied for Nov should now "
-                      "be the NET figure (343), not 355.")
+                print("Open that CSV — Room Occupied for Nov should now be NET (343), not 355.")
             except Exception as exc:  # noqa: BLE001
                 print("scrape failed: {}".format(vhp._describe(exc)))
     finally:
