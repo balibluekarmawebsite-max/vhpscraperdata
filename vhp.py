@@ -2517,13 +2517,26 @@ def _segment_combo(driver):
         By.CSS_SELECTOR, "[data-cy='{}'] [role='combobox']".format(_SEGMENT_CY))), None)
 
 
+def _ac_click(driver, el):
+    """A REAL mouse click (ActionChains move+press+release) — opens finicky
+    components that ignore Selenium's synthetic .click()."""
+    from selenium.webdriver.common.action_chains import ActionChains
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+    except Exception:  # noqa: BLE001
+        pass
+    ActionChains(driver).move_to_element(el).pause(0.1).click().perform()
+
+
 def _open_segment_menu(driver):
-    """Open the Segment Code dropdown and return (combo, aria_owns) once options are
-    showing, or (combo, owns) anyway after trying each method. VHP's multi-select
-    doesn't open on a plain wrapper click, so try the combobox click + keys, and
-    read options from BOTH .q-menu and the aria-owns listbox."""
+    """Open the Segment Code dropdown and return (combo, owns, options, log). VHP's
+    multi-select ignores synthetic clicks, so try a REAL ActionChains click and the
+    full JS mouse-event sequence on the combobox / native div, plus a JS keydown,
+    reading options from BOTH .q-menu and the aria-owns listbox."""
     combo = _segment_combo(driver)
     field = _find_segment_field(driver)
+    native = next((n for n in driver.find_elements(
+        By.CSS_SELECTOR, "[data-cy='{}']".format(_SEGMENT_CY))), None)
     owns = (combo.get_attribute("aria-owns") if combo else "") or ""
 
     def _opts():
@@ -2532,28 +2545,45 @@ def _open_segment_menu(driver):
         except Exception:  # noqa: BLE001
             return []
 
-    methods = []
+    attempts = []
     if combo is not None:
-        methods += [("click combo", lambda: _safe_click(driver, combo)),
-                    ("combo ArrowDown", lambda: combo.send_keys(Keys.ARROW_DOWN)),
-                    ("combo Enter", lambda: combo.send_keys(Keys.ENTER)),
-                    ("combo Space", lambda: combo.send_keys(Keys.SPACE))]
+        attempts.append(("actionchains combo", lambda: _ac_click(driver, combo)))
+        attempts.append(("force-click combo", lambda: _force_click(driver, combo)))
+    if native is not None:
+        attempts.append(("actionchains native", lambda: _ac_click(driver, native)))
     if field is not None:
-        methods.append(("click field", lambda: _safe_click(driver, field)))
+        attempts.append(("actionchains field", lambda: _ac_click(driver, field)))
+    if combo is not None:
+        attempts.append(("js keydown ArrowDown", lambda: driver.execute_script(
+            "arguments[0].focus();arguments[0].dispatchEvent(new KeyboardEvent('keydown',"
+            "{key:'ArrowDown',keyCode:40,which:40,bubbles:true}));", combo)))
+
     log = []
-    for name, fn in methods:
+    for name, fn in attempts:
         try:
             fn()
         except Exception as exc:  # noqa: BLE001
-            log.append("{}: click err {}".format(name, _describe(exc)))
+            log.append("{}: ERR {}".format(name, _describe(exc)))
             continue
-        time.sleep(0.9)
+        time.sleep(1.4)
         opts = _opts()
         exp = (combo.get_attribute("aria-expanded") if combo else "?")
         log.append("{}: expanded={} qmenu={} opts={}".format(
             name, exp, len(driver.find_elements(By.CSS_SELECTOR, ".q-menu")), len(opts)))
         if opts:
             return combo, owns, opts, log
+    # still nothing — dump the listbox + any popup so we can see where options live
+    try:
+        dump = driver.execute_script(r"""
+          var owns=arguments[0], out=[]; var lb=owns?document.getElementById(owns):null;
+          out.push('listbox present='+(!!lb)+(lb?(' html='+(lb.outerHTML||'').replace(/\s+/g,' ').slice(0,700)):''));
+          var pops=document.querySelectorAll('.q-menu,[role=listbox],.q-virtual-scroll,.q-dialog');
+          out.push('popup-ish='+pops.length);
+          return out.join(' || ');
+        """, owns)
+        log.append("DUMP: " + (dump or ""))
+    except Exception as exc:  # noqa: BLE001
+        log.append("dump ERR " + _describe(exc))
     return combo, owns, [], log
 
 
