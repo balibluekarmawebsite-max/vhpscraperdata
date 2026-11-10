@@ -176,7 +176,10 @@ PROPERTIES = [
 REPORTS = [
     {
         "name": "yearly-forecast-of-room-occupancy",
-        "cadence": "daily",   # change to "weekly"/"both" here anytime
+        # WEEKLY (Fridays, via `main.py weekly`): the full calendar-year occupancy
+        # view feeds the dashboard IMPORT (section B). The DAILY forward pickup is a
+        # SEPARATE report below (yearly-forecast-pickup). So this no longer runs daily.
+        "cadence": "weekly",
         "url": "https://e1-vhp.com/fr/report/yearly-forecast-of-room-occupancy",
         # Dashboard import: section B (monthly ACTUALS only; never budget/LY).
         "section": "B",
@@ -195,20 +198,11 @@ REPORTS = [
         "checkboxes": {"Show Revenue": True},
         # Exact VHP option labels to turn OFF in the Segment Code list.
         "segment_untick": ["COMPLIMENT", "HOUSE USE"],
-        # Daily PICKUP feed: besides the normal /api/import (section B) post above,
-        # ALSO post this SAME forecast CSV, as-is, to /api/daily/pickup with
-        # `property` + `snapshotDate=<today>` (the run date). One pull, one extra
-        # POST, per property, once a day. Uses the same bearer token as /api/import
-        # by default; if /api/daily/pickup uses a DIFFERENT token, add
-        # "token_file": "pickup_token.txt" (git-ignored) inside this block.
-        "extra_uploads": [
-            {
-                "url": "https://dashboard.bluekarmasecrets.com/api/daily/pickup",
-                # No snapshotDate: the dashboard defaults an absent snapshotDate to
-                # YESTERDAY (WITA), which is what it wants — not today's run date.
-                "require_ok": False,   # idempotent daily snapshot; accept any 2xx
-            },
-        ],
+        # NOTE: the daily /api/daily/pickup feed is handled by the SEPARATE
+        # current-month report below (yearly-forecast-pickup, cadence "daily"). This
+        # weekly January-start pull deliberately does NOT copy itself to
+        # /api/daily/pickup — doing so would overwrite the correct current-month
+        # pickup on Fridays (both default snapshotDate to yesterday -> same slot).
     },
     {
         "name": "reservation-by-creation-date",

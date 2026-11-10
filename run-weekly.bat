@@ -1,8 +1,11 @@
 @echo off
 REM ===========================================================================
-REM Weekly VHP run — the reservation-by-creation-date report (dashboard section
-REM C) for all properties. Schedule for FRIDAY ~07:00. Running on Friday makes
-REM the date window (last Fri..this Thu) and the dashboard week line up.
+REM Weekly VHP run (FRIDAY ~07:00) — for all properties:
+REM   * reservation-by-creation-date (dashboard section C), and
+REM   * yearly-forecast-of-room-occupancy (dashboard section B, full calendar year,
+REM     net of Compliment/House Use, with revenue).
+REM Running on Friday makes the reservation window (last Fri..this Thu) and the
+REM dashboard week line up.
 REM
 REM PRE-REQS (must be true when this runs):
 REM   * The 3 Chrome windows are OPEN and LOGGED INTO VHP.
