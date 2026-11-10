@@ -2353,82 +2353,96 @@ def _segment_value(driver):
     return ""
 
 
+def _real_click(driver, el):
+    """A real ActionChains click (scroll into view first); _force_click fallback."""
+    from selenium.webdriver.common.action_chains import ActionChains
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        time.sleep(0.15)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        ActionChains(driver).move_to_element(el).pause(0.05).click().perform()
+    except Exception:  # noqa: BLE001
+        _force_click(driver, el)
+
+
+def _segment_item_by_label(driver, label):
+    """The open menu's .q-item whose .q-item__label == label (case-insensitive)."""
+    want = " ".join((label or "").upper().split())
+    for it in driver.find_elements(By.CSS_SELECTOR, ".q-menu .q-item"):
+        try:
+            labs = it.find_elements(By.CSS_SELECTOR, ".q-item__label")
+            if labs and " ".join((labs[0].text or labs[0].get_attribute("textContent")
+                                   or "").upper().split()) == want:
+                return it
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _seg_item_checked(item):
+    """The aria-checked state (True/False) of a menu item's checkbox, or None."""
+    try:
+        cb = item.find_element(By.CSS_SELECTOR, "[role='checkbox']")
+        return cb.get_attribute("aria-checked") == "true"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _segment_untick(driver, exclude_labels):
-    """Set Segment Code to everything EXCEPT the given option labels.
+    """Set Segment Code to everything EXCEPT the given labels (e.g. COMPLIMENT,
+    HOUSE USE), so the occupancy export is NET.
 
-    Opens the data-cy='dropdown-segment-code' multi-select, makes sure all are
-    selected (deterministic start), then de-selects each excluded option. The
-    list is virtually scrolled, so options are found by scrolling the menu.
+    VHP's multi-select ignores synthetic clicks and its controls sit below the fold
+    on a small window, so ENLARGE the window and use REAL (ActionChains) clicks. The
+    open menu is a .q-menu listbox of .q-item rows, each a role=checkbox plus a
+    .q-item__label carrying the segment name.
     """
-    field = _find_segment_field(driver)
-    if field is None:
-        raise RuntimeError("Segment Code field (data-cy) not found")
+    try:
+        driver.set_window_size(1600, 1200)
+        time.sleep(0.3)
+    except Exception:  # noqa: BLE001
+        pass
 
-    # Open the dropdown; retry until its options actually render (slower PCs /
-    # longer code lists can lag behind the click).
-    for _ in range(3):
-        _safe_click(driver, field)
-        opened = False
-        for _ in range(12):
-            if driver.find_elements(By.CSS_SELECTOR, ".q-menu .q-item"):
-                opened = True
-                break
-            time.sleep(0.2)
-        if opened:
-            break
-    time.sleep(0.3)
+    _combo, _owns, opts, log = _open_segment_menu(driver)
+    if not opts:
+        raise RuntimeError("Segment Code menu would not open ({})".format(" | ".join(log[-3:])))
 
-    # Deterministic start: make sure everything is selected.
+    # Deterministic start: if a partial selection persisted, re-select All first
+    # (a fresh page load already shows ALL).
     if _segment_value(driver).upper() != "ALL":
-        allopt = _find_option(driver, "All")
-        if allopt is not None:
-            _safe_click(driver, allopt)
-            time.sleep(0.7)
+        allit = _segment_item_by_label(driver, "All")
+        if allit is not None:
+            _real_click(driver, allit)
+            time.sleep(0.6)
 
-    # Decide which options to de-select. Match each exclude token by NORMALIZED
-    # SUBSTRING (case-insensitive, whitespace-collapsed) against the real menu
-    # labels, so a config token like "COMPLIMENT" / "HOUSE USE" catches whatever
-    # VHP actually calls them ("Compliment", "Complimentary", "Compliment Room",
-    # "House Use - Staff", ...) AND every such segment, not just the first. If the
-    # menu can't be enumerated, fall back to treating the tokens as exact labels.
+    # Match each exclude token by normalized substring against the real labels, so
+    # "COMPLIMENT"/"HOUSE USE" hit VHP's exact "COMPLIMENT"/"HOUSE USE" (and any
+    # variants). opts came straight from the open menu.
     def _norm(s):
-        # fold to lower-case alphanumerics only, so "House Use", "HouseUse" and
-        # "House-Use" all compare equal (matches daily_json's status normaliser).
         return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
     tokens = [_norm(x) for x in (exclude_labels or []) if _norm(x)]
-    all_labels = _collect_menu_labels(driver)
-    if all_labels:
-        targets = [lbl for lbl in all_labels
-                   if any(tok in _norm(lbl) for tok in tokens)]
-        if not targets:
-            print("    (config) Segment Code: nothing matched {} in options: {}".format(
-                list(exclude_labels), all_labels[:40]))
-    else:
-        targets = list(exclude_labels or [])   # best-effort: raw tokens as exact labels
-        print("    (config) Segment Code: menu not enumerable; trying raw tokens")
+    targets = [lbl for lbl in opts
+               if lbl.upper() != "ALL" and any(t in _norm(lbl) for t in tokens)]
+    if not targets:
+        print("    (config) Segment Code: nothing matched {} in {}".format(
+            list(exclude_labels), opts[:40]))
 
-    missing = []
+    # De-select each target with a REAL click on its .q-item, and verify the
+    # checkbox flipped true -> false.
     for lbl in targets:
-        item = _find_option(driver, lbl)
+        item = _segment_item_by_label(driver, lbl)
         if item is None:
-            missing.append(lbl)
-            print("    (config) Segment Code: {!r} not found".format(lbl))
+            print("    (config) Segment Code: option {!r} not found".format(lbl))
             continue
-        _safe_click(driver, item)
-        print("    (config) Segment Code: de-selected {!r}".format(lbl))
+        before = _seg_item_checked(item)
+        _real_click(driver, item)
         time.sleep(0.4)
-
-    if missing:  # diagnostic: is the menu even open, and what labels are there?
-        try:
-            labels = driver.execute_script(
-                "var out=[];document.querySelectorAll('.q-menu .q-item__label').forEach("
-                "function(e){var t=(e.textContent||'').trim();if(t){out.push(t);}});"
-                "return out.slice(0,60);")
-            menu_open = any(_disp_safe(m) for m in driver.find_elements(By.CSS_SELECTOR, ".q-menu"))
-            print("    (config) segment diag: menu_open={} | options seen: {}".format(menu_open, labels))
-        except Exception:  # noqa: BLE001
-            pass
+        it2 = _segment_item_by_label(driver, lbl)
+        after = _seg_item_checked(it2) if it2 is not None else None
+        print("    (config) Segment Code: {!r} checkbox {} -> {}".format(lbl, before, after))
 
     # Close the dropdown fully so it can't bleed into SEARCH or the export menu.
     for _ in range(3):
@@ -2439,12 +2453,7 @@ def _segment_untick(driver, exclude_labels):
         time.sleep(0.3)
         if not any(_disp_safe(m) for m in driver.find_elements(By.CSS_SELECTOR, ".q-menu")):
             break
-        try:  # still open -> toggle the field closed
-            _safe_click(driver, field)
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(0.3)
-    print("    (config) Segment Code now shows: {}".format(_segment_value(driver)[:70] or "(blank)"))
+    print("    (config) Segment Code now shows: {}".format(_segment_value(driver)[:80] or "(blank)"))
 
 
 # Scroll the open q-menu's actual scrollable list. arguments: (delta, absolute).
@@ -2562,6 +2571,11 @@ def _open_segment_menu(driver):
     multi-select ignores synthetic clicks, so try a REAL ActionChains click and the
     full JS mouse-event sequence on the combobox / native div, plus a JS keydown,
     reading options from BOTH .q-menu and the aria-owns listbox."""
+    try:  # a big window so the control + options are on-screen for a real click
+        driver.set_window_size(1600, 1200)
+        time.sleep(0.3)
+    except Exception:  # noqa: BLE001
+        pass
     combo = _segment_combo(driver)
     field = _find_segment_field(driver)
     native = next((n for n in driver.find_elements(
