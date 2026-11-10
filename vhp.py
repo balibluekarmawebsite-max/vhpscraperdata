@@ -1819,6 +1819,11 @@ def _set_period_inner(driver, report):
     calendar popup, (3) a JS value-set, verifying each by reading the field back.
     Returns True once the shown range matches. Reports with no Date field (period
     None, or no such control) are a safe no-op."""
+    # VHP's collapse toggle hides the Month/date controls off-screen -> expand first.
+    try:
+        print("    (period) {}".format(_ensure_filter_panel_open(driver)))
+    except Exception:  # noqa: BLE001
+        pass
     p = report.get("period")
     # Month-picker reports (yearly-forecast): drive the Element-UI month field.
     #   "calendar_year"           -> January of the CURRENT year
@@ -2134,6 +2139,12 @@ def configure_report(driver, report):
     if not (report.get("dropdowns") or report.get("checkboxes")
             or report.get("segment_untick")):
         return
+    # VHP's collapse toggle hides the whole filter panel off-screen -> expand first,
+    # or every dropdown/checkbox/segment click lands out-of-bounds.
+    try:
+        print("    (config) {}".format(_ensure_filter_panel_open(driver)))
+    except Exception:  # noqa: BLE001
+        pass
     # Wait for the left filter panel to render (it can lag behind SEARCH).
     end = time.time() + 20
     while time.time() < end:
@@ -2399,7 +2410,7 @@ def _segment_untick(driver, exclude_labels):
     open menu is a .q-menu listbox of .q-item rows, each a role=checkbox plus a
     .q-item__label carrying the segment name.
     """
-    _maximize(driver)   # fit the window to the screen so controls are clickable
+    print("    (config) {}".format(_ensure_filter_panel_open(driver)))  # drawer must be open
 
     _combo, _owns, opts, log = _open_segment_menu(driver)
     if not opts:
@@ -2538,6 +2549,87 @@ def _maximize(driver):
             pass
 
 
+# --- Filter panel (Quasar drawer) expand/collapse -------------------------
+# VHP added a toggle that COLLAPSES the whole left filter panel. When collapsed,
+# every filter control (Month picker, Segment Code, even SEARCH) is pushed off
+# the viewport, so set_period / segment-untick clicks land out-of-bounds and the
+# month picker reads as "not found" — the export then comes out GROSS. The toggle
+# is a q-btn with class s-page-drawer__toggle; its chevron icon shows the state:
+#   mdi-chevron-double-left  -> drawer OPEN   (clicking it would COLLAPSE)
+#   mdi-chevron-double-right -> drawer CLOSED (clicking it EXPANDS)
+_DRAWER_TOGGLE_CSS = ".s-page-drawer__toggle"
+_DRAWER_STATE_JS = r"""
+  var btn=document.querySelector('.s-page-drawer__toggle');
+  if(!btn) return 'notoggle';
+  var icon=btn.querySelector('i.q-icon');
+  var cls=icon?(icon.className||''):'';
+  if(cls.indexOf('chevron-double-right')!==-1) return 'closed';
+  if(cls.indexOf('chevron-double-left')!==-1)  return 'open';
+  return 'unknown';
+"""
+# Is at least one real filter control actually ON the visible viewport? (A
+# collapsed drawer leaves the controls in the DOM but off-screen.) Used to
+# confirm an expand worked, and to disambiguate an unreadable chevron.
+_CONTROLS_ONSCREEN_JS = r"""
+  function onScreen(e){ if(!e) return false; var r=e.getBoundingClientRect();
+    if(r.width<2||r.height<2) return false;
+    var cx=r.left+r.width/2, cy=r.top+r.height/2;
+    return cx>=0 && cy>=0 && cx<=(window.innerWidth||0) && cy<=(window.innerHeight||0); }
+  var sel=["[data-cy='field-month']","[data-cy='dropdown-segment-code']"];
+  for(var i=0;i<sel.length;i++){ var e=document.querySelector(sel[i]);
+    if(e){ var a=e; for(var k=0;k<4 && a;k++){ if(onScreen(a)) return true; a=a.parentElement; } } }
+  var btns=document.querySelectorAll('button');
+  for(var j=0;j<btns.length;j++){ var t=(btns[j].textContent||'').trim().toUpperCase();
+    if(t==='SEARCH' && onScreen(btns[j])) return true; }
+  return false;
+"""
+
+
+def _drawer_state(driver):
+    try:
+        return driver.execute_script(_DRAWER_STATE_JS)
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _controls_onscreen(driver):
+    try:
+        return bool(driver.execute_script(_CONTROLS_ONSCREEN_JS))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ensure_filter_panel_open(driver, wait=6.0):
+    """Make sure the left filter panel (Quasar drawer) is EXPANDED before we drive
+    its controls. Maximize first, then — only when the toggle's chevron says the
+    drawer is CLOSED (or it's unreadable AND no control is on-screen) — click the
+    toggle to expand it and wait until a control is actually on the viewport. Never
+    closes an already-open drawer. Returns a short status string (callers print it)."""
+    _maximize(driver)
+    btns = driver.find_elements(By.CSS_SELECTOR, _DRAWER_TOGGLE_CSS)
+    if not btns:
+        return "no filter-panel toggle (old VHP layout)"
+    btn = btns[0]
+    st = _drawer_state(driver)
+    if st == "open" or (st == "unknown" and _controls_onscreen(driver)):
+        return "filter panel already open (state={})".format(st)
+    # 'closed' (or 'unknown' with nothing on-screen) -> expand. The toggle sits at
+    # the panel edge and stays on-screen, so a real click reaches it. Try twice.
+    for _ in range(2):
+        _real_click(driver, btn)
+        end = time.time() + wait
+        while time.time() < end:
+            time.sleep(0.3)
+            if _drawer_state(driver) == "open" or _controls_onscreen(driver):
+                time.sleep(0.6)  # let the panel's controls finish laying out
+                return "expanded filter panel (clicked drawer toggle)"
+        btns = driver.find_elements(By.CSS_SELECTOR, _DRAWER_TOGGLE_CSS)
+        if btns:
+            btn = btns[0]
+    return "clicked drawer toggle but still not open (state={}, onscreen={})".format(
+        _drawer_state(driver), _controls_onscreen(driver))
+
+
 def _vp_prepare(driver, el):
     """Maximize the window and scroll `el` to center, so a real click can reach it."""
     _maximize(driver)
@@ -2575,7 +2667,7 @@ def _open_segment_menu(driver):
     multi-select ignores synthetic clicks, so try a REAL ActionChains click and the
     full JS mouse-event sequence on the combobox / native div, plus a JS keydown,
     reading options from BOTH .q-menu and the aria-owns listbox."""
-    _maximize(driver)   # fit the window to the screen so controls are clickable
+    _ensure_filter_panel_open(driver)   # drawer must be expanded or the control is off-screen
     combo = _segment_combo(driver)
     field = _find_segment_field(driver)
     native = next((n for n in driver.find_elements(
