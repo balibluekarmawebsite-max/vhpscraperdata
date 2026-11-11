@@ -24,6 +24,9 @@ REM Per-run output is also saved under C:\vhp-scraper\logs\poller-*.log.
 REM ===========================================================================
 cd /d C:\vhp-scraper
 :loop
+REM Pull the latest committed code before (re)starting the poller, so a restart
+REM picks up fixes. Fast-forward only + non-fatal: if it can't pull, it carries on.
+git pull --ff-only
 echo [%date% %time%] starting VHP poller (leave this window open; close to stop)...
 C:\Python38\python.exe poller.py
 echo [%date% %time%] poller exited (code %ERRORLEVEL%) - restarting in 10s...

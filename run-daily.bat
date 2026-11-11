@@ -14,6 +14,11 @@ REM
 REM Output prints to the screen AND main.py writes a timestamped log under logs\.
 REM ===========================================================================
 cd /d C:\vhp-scraper
+REM Auto-update to the latest committed code FIRST, so a scheduled run never uses a
+REM stale checkout (which is how an old, pre-fix version kept pushing wrong data).
+REM Fast-forward only + non-fatal: if it can't pull (offline / diverged / git not on
+REM PATH), it prints the reason and the run carries on with the current code.
+git pull --ff-only
 C:\Python38\python.exe main.py daily
 REM Capture python's exit code BEFORE the echo (echo would reset ERRORLEVEL to 0,
 REM which made Task Scheduler always show "0 (OK)" even when the run failed).
