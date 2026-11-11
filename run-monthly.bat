@@ -1,9 +1,10 @@
 @echo off
 REM ===========================================================================
-REM Monthly VHP run — Account Production (YTD) for all properties -> Sales
-REM Highlight (/api/sales/account-production). Schedule for the **1st of every
-REM month at 08:00** — AFTER the 06:00 daily and 07:00 Friday weekly runs, so it
-REM never clashes (and the run-lock prevents overlap anyway).
+REM Monthly VHP run — the SALES feeds for all properties:
+REM   * Account Production (YTD) -> /api/sales/account-production  (Sales Highlight)
+REM   * Room Types (actuals)     -> /api/sales/room-types          (Rooms Analytics)
+REM Schedule for the **1st of every month at 08:00** — AFTER the 06:00 daily and
+REM 07:00 Friday weekly runs, so it never clashes (the run-lock also prevents overlap).
 REM
 REM It reports the PREVIOUS completed month, YTD. Examples:
 REM   * run on 1 Dec 2026 -> Date range 1 Jan .. 30 Nov 2026  (period 2026-11)
@@ -25,7 +26,7 @@ REM a scheduled run never uses a stale checkout. If it can't pull, it carries on
 git pull --ff-only
 echo. >> logs\monthly.log
 echo ===== [%date% %time%] account-production monthly run starting ===== >> logs\monthly.log
-C:\Python38\python.exe run_account_production.py all --post >> logs\monthly.log 2>&1
+C:\Python38\python.exe run_monthly.py all --post >> logs\monthly.log 2>&1
 set RC=%ERRORLEVEL%
 echo ===== [%date% %time%] finished (exit code %RC%) ===== >> logs\monthly.log
 exit /b %RC%

@@ -342,6 +342,60 @@ def run_account_production(driver, prop, report, download_dir, report_month,
     return payload, res
 
 
+def run_room_types(driver, prop, report, download_dir, report_month,
+                   dry_run=False, cfg=None, logger=None):
+    """MONTHLY Room Types (actuals) feed. Scrape Forecast Room by Room Type for the
+    REPORT MONTH itself ({month}-01 .. last day of that month) -- NOT YTD -- NET of
+    Compliment/House Use, read the per-room-type totals (the report's 'Room Type
+    Summary'), and POST to /api/sales/room-types. Returns (payload, result)."""
+    import calendar
+    cfg = cfg or config.UPLOAD
+    cols = report["columns"]
+    try:
+        year, month = int(report_month[:4]), int(report_month[5:7])
+        last = calendar.monthrange(year, month)[1]
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("bad report_month {!r} (want YYYY-MM): {}".format(
+            report_month, vhp._describe(exc)))
+    start = "{:04d}-{:02d}-01".format(year, month)
+    end = "{:04d}-{:02d}-{:02d}".format(year, month, last)
+
+    variant = dict(report)
+    variant["period"] = {"start": start, "end": end}   # the report month itself
+    _log(logger, "  room-types {} period={}: Date {} .. {}".format(
+        prop["code"].upper(), report_month, start, end))
+
+    rows = dj.read_csv_rows(vhp.scrape_report(driver, prop, variant, download_dir))
+    room_types = dj.aggregate_room_types(
+        rows, cols["room_type"], cols["room_nights"], cols["revenue"])
+    payload = dj.build_room_types_payload(
+        prop["code"], report_month, room_types, source=report.get("source"))
+    _log(logger, "    {} row(s) -> {} room type(s): {}".format(
+        len(rows), len(room_types),
+        ", ".join("{}({}rn/{})".format(r["roomType"], r["roomNights"], r["revenue"])
+                  for r in room_types[:8]) + (" ..." if len(room_types) > 8 else "")))
+    res = _post(report, payload, cfg, dry_run, logger)
+    return payload, res
+
+
+# MONTHLY feeds take a `report_month` -> dispatch by kind (separate from the daily
+# _RUNNERS, whose signature is different).
+_MONTHLY_RUNNERS = {
+    "json_account_production": run_account_production,
+    "json_room_types": run_room_types,
+}
+
+
+def run_monthly(driver, prop, report, download_dir, report_month,
+                dry_run=False, cfg=None, logger=None):
+    """Run one MONTHLY_JSON_REPORTS entry by its kind. Returns (payload, result)."""
+    fn = _MONTHLY_RUNNERS.get(report.get("kind"))
+    if fn is None:
+        raise ValueError("unknown monthly-json report kind: {!r}".format(report.get("kind")))
+    return fn(driver, prop, report, download_dir, report_month,
+              dry_run=dry_run, cfg=cfg, logger=logger)
+
+
 # Dispatch by report["kind"], so a runner (or main.py) can handle both uniformly.
 _RUNNERS = {
     "json_reservation": run_reservation,

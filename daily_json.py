@@ -380,3 +380,44 @@ def build_account_production_payload(property_code, period, accounts, source=Non
     if source:
         body["source"] = source
     return body
+
+
+def aggregate_room_types(rows, room_type_key, nights_key, revenue_key):
+    """Forecast Room by Room Type -> [{roomType, roomNights, revenue}] per room type.
+
+    The report repeats its data: a per-DATE table, then a 'Room Type Summary' table
+    (per-room-type totals for the whole date range), both with the same columns. We
+    keep the LAST value seen per room type, so the SUMMARY (which comes last = the
+    period total per room type) wins -- correct for both a one-day and a full-month
+    pull. Skips the repeated header, date sub-headers (a date in the Room Type cell),
+    blanks, and TOTAL / Grand TOTAL rows. Revenue is rounded to whole rupiah."""
+    seen = OrderedDict()   # roomType -> {"roomNights", "revenue"} (last wins)
+    for row in rows:
+        rt = " ".join(str(row.get(room_type_key, "") or "").split())
+        if not rt:
+            continue
+        low = rt.lower().replace(" ", "")
+        if low in ("roomtype", "total", "grandtotal", "totalrp", "grandtotalrp"):
+            continue
+        if to_iso(rt) is not None:          # a date sub-header (e.g. 11/11/2026)
+            continue
+        nights = _to_number(row.get(nights_key), None)
+        revenue = _to_number(row.get(revenue_key), None)
+        if nights is None and revenue is None:
+            continue                         # not a data row
+        seen[rt] = {"roomNights": int(round(nights or 0)),
+                    "revenue": int(round(revenue or 0))}
+    out = [{"roomType": rt, "roomNights": v["roomNights"], "revenue": v["revenue"]}
+           for rt, v in seen.items()]
+    out.sort(key=lambda e: (-(e["revenue"] or 0), e["roomType"]))
+    return out
+
+
+def build_room_types_payload(property_code, period, room_types, source=None):
+    """{property, period, roomTypes, source} for POST /api/sales/room-types.
+    `period` is the report month 'YYYY-MM' (actuals for that month)."""
+    body = {"property": property_code.upper(), "period": period,
+            "roomTypes": list(room_types or [])}
+    if source:
+        body["source"] = source
+    return body

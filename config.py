@@ -431,6 +431,30 @@ MONTHLY_JSON_REPORTS = [
         "period_required": True,
         "columns": {"account": "Guest Type", "room_nights": "Room", "revenue": "Room Revenue"},
     },
+    {
+        # ROOM TYPES (monthly, actuals) -> POST /api/sales/room-types (Rooms Analytics).
+        # VHP 'Forecast Room by Room Type'. Unlike account-production this is the REPORT
+        # MONTH ITSELF (not YTD): Date range = {month}-01 .. last day of that month
+        # (e.g. June 2026 -> 2026-06-01..2026-06-30). We read the per-room-type totals
+        # (the report's 'Room Type Summary'), NET of Compliment/House Use.
+        "name": "forecast-room-by-room-type",
+        "kind": "json_room_types",
+        "cadence": "monthly",
+        "url": "https://e1-vhp.com/fr/report/forecast-room-by-room-type",
+        "section": "D",            # logging only — uses its own /api/sales endpoint
+        "source": "vhp:forecast-room-by-room-type",
+        "upload": {
+            "url": "https://dashboard.bluekarmasecrets.com/api/sales/room-types",
+            "require_ok": False,   # idempotent (re-send replaces the month)
+            # Default token = IMPORT_API_TOKEN. For a separate SALES_API_TOKEN add
+            #   "token_env": "SALES_API_TOKEN",  or  "token_file": "sales_token.txt".
+        },
+        # Tick 'Exclude Compliment/House Use' so room nights + revenue are NET.
+        "checkboxes": {"Exclude Compliment/House Use": True},
+        # Date range (the report month) set at run time; gate ON to skip a bad window.
+        "period_required": True,
+        "columns": {"room_type": "Room Type", "room_nights": "Room Night", "revenue": "Room Revenue"},
+    },
 ]
 
 
