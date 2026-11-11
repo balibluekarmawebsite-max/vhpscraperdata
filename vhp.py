@@ -2125,6 +2125,31 @@ def select_date_mode(driver, report):
         return False
 
 
+def _pace_filter():
+    """A short, configurable pause between filter-menu clicks (config.PACING
+    'filter_step') so VHP doesn't burst-render the panel — eases the 'Aw, Snap!
+    Out of Memory' crash. No-op when the delay is 0/unset."""
+    s = config.pace("filter_step", 0.0)
+    if s > 0:
+        time.sleep(s)
+
+
+def park_tab(driver, settle=None):
+    """Park the tab on about:blank so Chrome frees the heavy report's DOM/memory
+    before the next render — the main defence against the 'Aw, Snap! Out of Memory'
+    crash when reports run back-to-back. Best-effort; never raises. No-op when
+    config.PACING['park_between_reports'] is false."""
+    if not (getattr(config, "PACING", {}) or {}).get("park_between_reports", True):
+        return
+    try:
+        driver.get("about:blank")
+    except Exception:  # noqa: BLE001 - a parking hiccup must never break the run
+        return
+    s = settle if settle is not None else config.pace("park_settle", 2.0)
+    if s > 0:
+        time.sleep(s)
+
+
 def configure_report(driver, report):
     """Best-effort: apply the report's filter settings before SEARCH.
 
@@ -2162,6 +2187,7 @@ def configure_report(driver, report):
         except Exception as exc:  # noqa: BLE001 - best-effort; default usually matches
             print("    (config) dropdown {!r} -> {!r}: {}".format(
                 label, value, _describe(exc)))
+        _pace_filter()   # slow filter edits down for memory relief
 
     for label, want in (report.get("checkboxes") or {}).items():
         try:
@@ -2170,6 +2196,7 @@ def configure_report(driver, report):
                 label, "on" if want else "off", "" if changed else " (already)"))
         except Exception as exc:  # noqa: BLE001
             print("    (config) checkbox {!r}: {}".format(label, _describe(exc)))
+        _pace_filter()
 
     labels = report.get("segment_untick") or []
     if labels:
@@ -2447,6 +2474,7 @@ def _segment_untick(driver, exclude_labels):
         before = _seg_item_checked(item)
         _real_click(driver, item)
         time.sleep(0.4)
+        _pace_filter()   # ease the render between de-selects
         it2 = _segment_item_by_label(driver, lbl)
         after = _seg_item_checked(it2) if it2 is not None else None
         print("    (config) Segment Code: {!r} checkbox {} -> {}".format(lbl, before, after))

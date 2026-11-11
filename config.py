@@ -455,6 +455,35 @@ EXPORT_EXT = "csv"
 # How long to wait (seconds) for a download to finish before giving up.
 DOWNLOAD_TIMEOUT = 120
 
+# ---------------------------------------------------------------------------
+# PACING / MEMORY RELIEF
+# ---------------------------------------------------------------------------
+# VHP's heavy reports (the yearly occupancy matrix especially) can crash Chrome
+# with "Aw, Snap! Out of Memory" when they render back-to-back in a long-lived
+# window. These pauses slow the run DOWN so the renderer has time to release
+# memory between reports, and the filter clicks don't burst-render. All values are
+# in SECONDS; raise any of them if the crash still happens. Set a delay to 0 to
+# turn just that pause off. (The run has plenty of spare time at 6am, so slow is
+# fine.)
+PACING = {
+    "between_reports":      8.0,   # pause after each report before the next one
+    "between_properties":  20.0,   # pause between properties (BKDS -> BKDU -> BKV)
+    "filter_step":          0.8,   # extra pause between individual filter clicks
+    "park_between_reports": True,  # park the tab on about:blank between reports to
+                                   #   FREE the heavy grid's memory before the next
+    "park_settle":          2.5,   # settle time after parking on about:blank
+}
+
+
+def pace(key, default=0.0):
+    """A configurable delay (seconds) from PACING (see the PACING comment above).
+    Missing key / bad value -> `default`. Used by the run loop and the scraper to
+    slow things down for memory relief."""
+    try:
+        return float((PACING or {}).get(key, default))
+    except (TypeError, ValueError):
+        return default
+
 # Folders to watch for a finished download. We prefer our own downloads/ dir,
 # but Chrome (attached to an existing window) can land files in the user's
 # default Downloads after a page navigation — so watch both.

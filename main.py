@@ -17,13 +17,29 @@ import logging
 import os
 import subprocess
 import sys
+import time
 
 import config
 import daily_reports
 from browser import ensure_window, kill_stale_chromedrivers
 from runlock import RunLock
 from uploader import UploadError, upload
-from vhp import LoginRequired, ensure_logged_in, scrape_report
+from vhp import LoginRequired, ensure_logged_in, park_tab, scrape_report
+
+
+def _relieve(driver, logger, tag):
+    """Between heavy reports: park the tab on about:blank (so Chrome frees that
+    report's memory) and pause, so the renderer settles before the next render.
+    This is the main guard against the 'Aw, Snap! Out of Memory' crash when reports
+    run back-to-back. Delays come from config.PACING; never raises."""
+    try:
+        park_tab(driver)
+    except Exception:  # noqa: BLE001 - memory relief must never break the run
+        pass
+    gap = config.pace("between_reports", 0.0)
+    if gap > 0:
+        logger.info("[%s] pausing %.0fs before the next report (memory relief)", tag, gap)
+        time.sleep(gap)
 
 VALID_CADENCES = ("daily", "weekly", "both")
 
@@ -168,6 +184,7 @@ def run_property(logger, prop, reports, json_reports=()):
             except Exception as exc:  # noqa: BLE001 - isolate per-report failures
                 fail += 1
                 logger.exception("[%s] FAILED: %s", tag, exc)
+            _relieve(driver, logger, tag)   # free memory + pause before the next report
 
         # Derived JSON feeds (reservation arrivals+pickups, room departures). Same
         # window/session; each POSTs its own aggregated JSON to /api/daily/*.
@@ -194,6 +211,7 @@ def run_property(logger, prop, reports, json_reports=()):
                 except Exception as exc:  # noqa: BLE001 - isolate per-feed failures
                     fail += 1
                     logger.exception("[%s] JSON feed FAILED: %s", tag, exc)
+                _relieve(driver, logger, tag)   # free memory + pause before the next feed
 
         # Anything not reached (session died mid-run) counts as failed.
         if attempted < total_due:
@@ -249,12 +267,18 @@ def main(argv):
     try:
         kill_stale_chromedrivers()  # clear leftover drivers from previous runs
 
-        for prop in config.PROPERTIES:
+        props = list(config.PROPERTIES)
+        for i, prop in enumerate(props):
             lock.refresh()  # keep the lock fresh across a long multi-report run
             logger.info("=== %s (%s) ===", prop["name"], prop["code"])
             ok, fail = run_property(logger, prop, reports, json_reports)
             total_ok += ok
             total_fail += fail
+            # Stagger properties so the 3 windows don't pile heavy renders together.
+            gap = config.pace("between_properties", 0.0)
+            if gap > 0 and i < len(props) - 1:
+                logger.info("pausing %.0fs before the next property (memory relief)", gap)
+                time.sleep(gap)
     finally:
         lock.release()
 
