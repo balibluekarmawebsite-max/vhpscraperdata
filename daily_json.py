@@ -330,3 +330,53 @@ def build_departure_payload(property_code, departures, snapshot_date=None, today
     body = _envelope(property_code, snapshot_date)
     body["departures"] = list(departures or [])
     return body
+
+
+# VHP's Forecast Room Production "Total" rows carry the word spaced out
+# ("T o t a l", "T o t a l  Rp"); after removing spaces they are exactly these.
+_ACCOUNT_SKIP = {"total", "totalrp", "grandtotal", "grandtotalrp"}
+
+
+def aggregate_account_production(rows, account_key, nights_key, revenue_key):
+    """Forecast Room Production (Display = 'Guest Type') -> per-account totals:
+    [{account, roomNights, revenue}].
+
+    Each row is already one account (VHP groups by Guest Type over the date range).
+    The Guest Type cell is 'Account Name,[ optional category]', so the account name
+    is the text BEFORE the first comma. Total/subtotal rows and empty rows are
+    dropped. roomNights = the 'Room' column (room-nights summed over the range),
+    revenue = the 'Room Revenue' column.
+
+    `type` is intentionally NOT emitted: VHP's category suffix (e.g. 'T&T') is not
+    the dashboard's OTA/TA/Corporate/Wholesaler taxonomy, so we let the dashboard
+    classify by account name (per the feed spec)."""
+    out = []
+    for r in rows:
+        raw = str(r.get(account_key, "") or "").strip()
+        if not raw:
+            continue
+        name = " ".join(raw.split(",")[0].split())          # before 1st comma, tidy spaces
+        if not name or name.lower().replace(" ", "") in _ACCOUNT_SKIP:
+            continue
+        nights = _to_number(r.get(nights_key), 0)
+        revenue = _to_number(r.get(revenue_key), 0)
+        if not nights and not revenue:
+            continue                                          # skip blank/placeholder rows
+        # roomNights is a whole count; revenue -> whole rupiah (the dashboard stores
+        # integers, and rupiah has no meaningful fractional part).
+        out.append({"account": name,
+                    "roomNights": int(round(nights)),
+                    "revenue": int(round(revenue))})
+    # Largest producers first, then by name — a stable, readable payload.
+    out.sort(key=lambda e: (-(e["revenue"] or 0), e["account"]))
+    return out
+
+
+def build_account_production_payload(property_code, period, accounts, source=None):
+    """{property, period, accounts, source} for POST /api/sales/account-production.
+    `period` is the report month 'YYYY-MM' (data is YTD through that month)."""
+    body = {"property": property_code.upper(), "period": period,
+            "accounts": list(accounts or [])}
+    if source:
+        body["source"] = source
+    return body

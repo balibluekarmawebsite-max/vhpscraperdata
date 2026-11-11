@@ -305,6 +305,43 @@ def run_departure(driver, prop, report, download_dir, today=None,
     return payload, res
 
 
+def run_account_production(driver, prop, report, download_dir, report_month,
+                           dry_run=False, cfg=None, logger=None):
+    """MONTHLY Account Production (YTD) feed. Scrape the Forecast Room Production
+    report with the Date range set to YTD through `report_month` ('YYYY-MM') --
+    {year}-01-01 .. last day of that month -- aggregate per account (Guest Type ->
+    Room nights + Room Revenue), and POST to /api/sales/account-production.
+    Returns (payload, result)."""
+    import calendar
+    cfg = cfg or config.UPLOAD
+    cols = report["columns"]
+    try:
+        year, month = int(report_month[:4]), int(report_month[5:7])
+        last = calendar.monthrange(year, month)[1]
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("bad report_month {!r} (want YYYY-MM): {}".format(
+            report_month, vhp._describe(exc)))
+    start = "{:04d}-01-01".format(year)
+    end = "{:04d}-{:02d}-{:02d}".format(year, month, last)
+
+    variant = dict(report)
+    variant["period"] = {"start": start, "end": end}   # YTD date range
+    _log(logger, "  account-production {} period={}: Date {} .. {}".format(
+        prop["code"].upper(), report_month, start, end))
+
+    rows = dj.read_csv_rows(vhp.scrape_report(driver, prop, variant, download_dir))
+    accounts = dj.aggregate_account_production(
+        rows, cols["account"], cols["room_nights"], cols["revenue"])
+    payload = dj.build_account_production_payload(
+        prop["code"], report_month, accounts, source=report.get("source"))
+    _log(logger, "    {} row(s) -> {} account(s): {}".format(
+        len(rows), len(accounts),
+        ", ".join("{}({}rn/{})".format(a["account"], a["roomNights"], a["revenue"])
+                  for a in accounts[:8]) + (" ..." if len(accounts) > 8 else "")))
+    res = _post(report, payload, cfg, dry_run, logger)
+    return payload, res
+
+
 # Dispatch by report["kind"], so a runner (or main.py) can handle both uniformly.
 _RUNNERS = {
     "json_reservation": run_reservation,

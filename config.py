@@ -396,6 +396,48 @@ def daily_json_report(name):
     room-departure-daily), or None."""
     return next((r for r in DAILY_JSON_REPORTS if r["name"] == name), None)
 
+
+# ---------------------------------------------------------------------------
+# MONTHLY JSON feeds — NOT run by main.py daily/weekly. Pulled once a month by
+# run_account_production.py (and optionally a run-monthly.bat scheduled task on
+# the 1st, reporting the previous completed month).
+# ---------------------------------------------------------------------------
+MONTHLY_JSON_REPORTS = [
+    {
+        # ACCOUNT PRODUCTION (YTD) -> POST /api/sales/account-production (Sales Highlight).
+        # VHP 'Forecast Room Production' with Display = Guest Type groups per account
+        # (agent/channel). We set the Date range to YTD: {year}-01-01 .. last day of
+        # the report month (e.g. Oct 2026 -> 2026-01-01..2026-10-31), read each account
+        # row's Room (= room nights) + Room Revenue, and POST the per-account totals.
+        "name": "forecast-room-production",
+        "kind": "json_account_production",
+        "cadence": "monthly",
+        "url": "https://e1-vhp.com/fr/report/forecast-room-production",
+        "section": "D",            # logging only — uses its own /api/sales endpoint
+        "source": "vhp:forecast-room-production",
+        "upload": {
+            "url": "https://dashboard.bluekarmasecrets.com/api/sales/account-production",
+            "require_ok": False,   # idempotent (re-send replaces the month); accept any 2xx
+            # Default token = the shared IMPORT_API_TOKEN. If /api/sales uses a
+            # SEPARATE token (SALES_API_TOKEN), uncomment ONE of:
+            #   "token_env": "SALES_API_TOKEN",
+            #   "token_file": "sales_token.txt",   # git-ignored
+        },
+        # Group per account. Best-effort (VHP already defaults to Guest Type); if it
+        # can't be set we still read the Guest Type column.
+        "dropdowns": {"Display Options": "Guest Type"},
+        # The Date range (YTD) is set at run time from the report month; gate ON so a
+        # wrong/failed range SKIPS rather than posting a wrong-window total.
+        "period_required": True,
+        "columns": {"account": "Guest Type", "room_nights": "Room", "revenue": "Room Revenue"},
+    },
+]
+
+
+def monthly_json_report(name):
+    """Look up a MONTHLY_JSON_REPORTS entry by name (e.g. forecast-room-production)."""
+    return next((r for r in MONTHLY_JSON_REPORTS if r["name"] == name), None)
+
 # ---------------------------------------------------------------------------
 # UPLOAD
 # ---------------------------------------------------------------------------
