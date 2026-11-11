@@ -229,6 +229,16 @@ def run_departure(driver, prop, report, download_dir, today=None,
         step("search", lambda: vhp.click_search(driver))
         if step("wait ready", lambda: vhp.wait_for_report_ready(driver)) == "empty":
             return []
+        # A telephone-operator grid with NO departures that day has no file to
+        # export -> VHP never starts the download and the export hangs the full 120s,
+        # failing the whole feed. Detect 0 rooms and return [] (= 0 departures) so the
+        # day still POSTs. (rc == -1 means the layout wasn't recognised -> don't
+        # assume empty; fall through to the normal export.)
+        rc = vhp.departure_room_count(driver)
+        if rc == 0:
+            _log(logger, "    [departure/{}/{}] grid has 0 departure rooms -> empty day; "
+                 "skipping export (posts 0 for this view)".format(prop["code"], suffix))
+            return []
         return step("export", lambda: dj.read_csv_rows(vhp.export_and_download(
             driver, prop, variant["name"], download_dir, baseline=pre_sig)))
 

@@ -3137,6 +3137,39 @@ def dump_display_options(driver):
         return ["(could not read Display options: {})".format(_describe(exc))]
 
 
+# Count DISTINCT room numbers in the telephone-operator grid, so we can tell a
+# genuinely EMPTY departure day (no rooms) from a grid that has data. VHP's
+# "Export to CSV" produces NO download file for an empty grid, so exporting it
+# hangs for the full 120s and fails the feed — we skip the export when this is 0.
+_DEPARTURE_ROOMS_JS = r"""
+  var tbl = document.querySelector('table.q-table');
+  if (!tbl) return -1;
+  var ths = tbl.querySelectorAll('th'), idx = -1;
+  for (var i=0;i<ths.length;i++){ if(/room\s*number/i.test(ths[i].textContent||'')){ idx=i; break; } }
+  if (idx < 0) return -1;                       // layout we don't recognise -> don't assume empty
+  var rooms = {}, rows = tbl.querySelectorAll('tbody tr');
+  for (var r=0;r<rows.length;r++){
+    var tds = rows[r].querySelectorAll('td');
+    if (idx < tds.length){
+      var v = (tds[idx].textContent||'').trim();
+      if (v && /\d/.test(v)) rooms[v] = 1;      // a real room number contains a digit
+    }
+  }
+  return Object.keys(rooms).length;
+"""
+
+
+def departure_room_count(driver):
+    """Distinct room numbers currently in the telephone-operator grid. 0 = an empty
+    departure day (nothing to export); -1 = the grid/column wasn't found (so DON'T
+    assume empty — fall through to the normal export). Never raises."""
+    try:
+        n = driver.execute_script(_DEPARTURE_ROOMS_JS)
+        return int(n) if n is not None else -1
+    except Exception:  # noqa: BLE001
+        return -1
+
+
 def _visible_menu_items(driver):
     """Return [(element, UPPER_TEXT, raw_text)] for each visible row of an open
     Quasar menu. Prefers rows inside the floating .q-menu, falling back to any
