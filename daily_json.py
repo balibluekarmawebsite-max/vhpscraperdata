@@ -421,3 +421,16 @@ def build_room_types_payload(property_code, period, room_types, source=None):
     if source:
         body["source"] = source
     return body
+
+
+def build_guests_payload(property_code, scope, csv_text, source=None, last_year_csv=None):
+    """{property, scope, csv, source, [lastYearCsv]} for POST /api/sales/guests.
+    The dashboard parses the raw CSV (and can read property/period from its header),
+    so we post the CSV AS-IS -- no column mapping. `scope` is 'MTD' or 'YTD'.
+    The CSV holds guest names (PII); callers must not print it."""
+    body = {"property": property_code.upper(), "scope": scope, "csv": csv_text or ""}
+    if source:
+        body["source"] = source
+    if last_year_csv:
+        body["lastYearCsv"] = last_year_csv
+    return body

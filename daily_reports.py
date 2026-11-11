@@ -378,11 +378,87 @@ def run_room_types(driver, prop, report, download_dir, report_month,
     return payload, res
 
 
+def _post_guests(report, payload, cfg, dry_run, logger, scope):
+    """POST the guests payload, or in dry-run show a PII-SAFE summary (never the
+    guest CSV). The CSV holds guest names, so its contents are never printed/logged."""
+    up = report.get("upload") or {}
+    csv_bytes = len(payload.get("csv") or "")
+    if dry_run or not up.get("url"):
+        _log(logger, "    (dry-run) NOT posting [{}] — {} bytes of CSV to {}".format(
+            scope, csv_bytes, up.get("url") or "(no url)"))
+        return {"_dry_run": True, "_scope": scope, "_csv_bytes": csv_bytes}
+    token = uploader._resolve_token(up, cfg)
+    res = uploader.post_json(payload, up["url"], token,
+                             bool(up.get("require_ok", False)), cfg)
+    _log(logger, "    POST {} [{}] -> {} ({})".format(
+        up["url"], scope, res.get("_status"), res.get("_timings")))
+    return res
+
+
+def run_guests(driver, prop, report, download_dir, report_month,
+               dry_run=False, cfg=None, logger=None):
+    """MONTHLY Guests feed. For the report month, scrape VHP's Arrival Guest report
+    for each scope and POST its RAW CSV to /api/sales/guests (the dashboard parses
+    it -- no column mapping on our side):
+      * MTD -> Date range = {month}-01 .. last day of month
+      * YTD -> Date range = {year}-01-01 .. last day of month
+    The CSV holds GUEST NAMES (PII): it is read + POSTed to the dashboard, never
+    printed in full or committed (we log only a byte count + the header row).
+    Returns (payload, result) of the LAST scope posted; raises if any scope failed."""
+    import calendar
+    cfg = cfg or config.UPLOAD
+    try:
+        year, month = int(report_month[:4]), int(report_month[5:7])
+        last = calendar.monthrange(year, month)[1]
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("bad report_month {!r} (want YYYY-MM): {}".format(
+            report_month, vhp._describe(exc)))
+    end = "{:04d}-{:02d}-{:02d}".format(year, month, last)
+    ranges = {
+        "MTD": {"start": "{:04d}-{:02d}-01".format(year, month), "end": end},
+        "YTD": {"start": "{:04d}-01-01".format(year), "end": end},
+    }
+
+    last_payload = last_res = None
+    posted, errors = [], []
+    for scope in (report.get("scopes") or ["MTD", "YTD"]):
+        rng = ranges.get(scope)
+        if rng is None:
+            _log(logger, "    (guests) unknown scope {!r} — skipping".format(scope))
+            continue
+        variant = dict(report)
+        variant["period"] = rng
+        _log(logger, "  guests {} {} [{}]: Date {} .. {}".format(
+            prop["code"].upper(), report_month, scope, rng["start"], rng["end"]))
+        try:
+            path = vhp.scrape_report(driver, prop, variant, download_dir)
+            csv_text = dj._read_text(path)
+            header = (csv_text.splitlines() or [""])[0][:200]   # column names, not PII
+            _log(logger, "    [{}] {} bytes; header: {}".format(scope, len(csv_text), header))
+            payload = dj.build_guests_payload(prop["code"], scope, csv_text,
+                                              source=report.get("source"))
+            res = _post_guests(report, payload, cfg, dry_run, logger, scope)
+            last_payload, last_res = payload, res
+            posted.append(scope)
+        except vhp.LoginRequired:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one scope failing shouldn't lose the other
+            errors.append("{}: {}".format(scope, vhp._describe(exc)))
+            _log(logger, "    [{}] FAILED: {}".format(scope, vhp._describe(exc)))
+    if errors:
+        raise RuntimeError("guests feed: posted {} but FAILED [{}]".format(
+            posted or "none", "; ".join(errors)))
+    if last_payload is None:
+        raise RuntimeError("guests feed produced nothing (no scopes configured)")
+    return last_payload, last_res
+
+
 # MONTHLY feeds take a `report_month` -> dispatch by kind (separate from the daily
 # _RUNNERS, whose signature is different).
 _MONTHLY_RUNNERS = {
     "json_account_production": run_account_production,
     "json_room_types": run_room_types,
+    "json_guests": run_guests,
 }
 
 

@@ -455,6 +455,29 @@ MONTHLY_JSON_REPORTS = [
         "period_required": True,
         "columns": {"room_type": "Room Type", "room_nights": "Room Night", "revenue": "Room Revenue"},
     },
+    {
+        # GUESTS (monthly) -> POST /api/sales/guests (raw CSV; the dashboard parses it).
+        # VHP 'Arrival Guest'. Pulled for TWO scopes per month, each as its own POST:
+        #   MTD -> Date range = {month}-01 .. last day of that month
+        #   YTD -> Date range = {year}-01-01 .. last day of that month
+        # The whole CSV is posted AS-IS (no column map). It contains GUEST NAMES
+        # (PII): it is read + POSTed to the dashboard, never committed or printed in
+        # full (the dry-run shows only a byte count + the header row).
+        "name": "arrival-guest",
+        "kind": "json_guests",
+        "cadence": "monthly",
+        "url": "https://e1-vhp.com/fr/report/arrival-guest",
+        "section": "D",            # logging only — uses its own /api/sales endpoint
+        "source": "vhp:arrival-guest",
+        "upload": {
+            "url": "https://dashboard.bluekarmasecrets.com/api/sales/guests",
+            "require_ok": False,   # idempotent (re-send replaces); accept any 2xx
+            # Default token = IMPORT_API_TOKEN. For a separate SALES_API_TOKEN add
+            #   "token_env": "SALES_API_TOKEN",  or  "token_file": "sales_token.txt".
+        },
+        "scopes": ["MTD", "YTD"],  # two date ranges pulled + posted per month
+        "period_required": True,   # skip a scope whose date range can't be set
+    },
 ]
 
 
