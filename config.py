@@ -475,6 +475,8 @@ MONTHLY_JSON_REPORTS = [
             # Default token = IMPORT_API_TOKEN. For a separate SALES_API_TOKEN add
             #   "token_env": "SALES_API_TOKEN",  or  "token_file": "sales_token.txt".
         },
+        # Tick 'Display Room Rate' so the CSV includes the rate column before export.
+        "checkboxes": {"Display Room Rate": True},
         "scopes": ["MTD", "YTD"],  # two date ranges pulled + posted per month
         "period_required": True,   # skip a scope whose date range can't be set
     },
