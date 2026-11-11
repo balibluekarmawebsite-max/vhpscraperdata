@@ -181,10 +181,19 @@ def run_departure(driver, prop, report, download_dir, today=None,
         to_date); 'Departed' has a 'From - Until' RANGE (pass period, set via
         set_period). Returns the exported rows ([] if the grid is empty). Each step
         names itself in any error, so a failure reads like '[search] ...'."""
+        def _state():
+            return vhp.telop_page_state(driver)
+
         def step(name, fn):
             try:
                 return fn()
             except Exception as exc:  # noqa: BLE001
+                # Log WHERE it failed + a page-state snapshot, so a failure (esp. the
+                # BKDU departure one we can't watch) is diagnosable from the log alone.
+                _log(logger, "    [departure/{}/{}] FAILED at [{}]: {}".format(
+                    prop["code"], suffix, name, vhp._describe(exc)))
+                _log(logger, "    [departure/{}/{}] page state: {}".format(
+                    prop["code"], suffix, _state()))
                 raise RuntimeError("[{}] {}".format(name, vhp._describe(exc)))
 
         variant = dict(report)
@@ -194,8 +203,16 @@ def run_departure(driver, prop, report, download_dir, today=None,
             variant["period"] = period
         step("open", lambda: vhp.open_report(driver, variant))
         vhp.dismiss_blocking_dialog(driver)
-        step("configure", lambda: vhp.configure_report(driver, variant))
+        time.sleep(1.5)   # let the telephone-operator page settle after it loads
+        step("configure", lambda: vhp.configure_report(driver, variant))  # sets Display view
+        time.sleep(2.0)   # let the Display view switch fully re-render (don't rush it)
         if not vhp.dropdown_shows(driver, "Display", display_mode):
+            # The likeliest BKDU cause: the Display view didn't switch. Log what views
+            # VHP actually offers + the page state, then fail with a clear reason.
+            _log(logger, "    [departure/{}/{}] Display != {!r}; VHP's Display options: {}".format(
+                prop["code"], suffix, display_mode, vhp.dump_display_options(driver)))
+            _log(logger, "    [departure/{}/{}] page state: {}".format(
+                prop["code"], suffix, _state()))
             raise RuntimeError("[display] {!r} not active".format(display_mode))
         if to_date is not None:
             ok = step("set to-date", lambda: vhp.set_single_date(driver, label, to_date))
@@ -204,6 +221,8 @@ def run_departure(driver, prop, report, download_dir, today=None,
             ok = step("set range", lambda: vhp.set_period(driver, variant))
             what = str(period)
         if not ok:
+            _log(logger, "    [departure/{}/{}] page state: {}".format(
+                prop["code"], suffix, _state()))
             raise RuntimeError("[date] could not set {}".format(what))
         time.sleep(2.0)   # let the date-change re-render/auto-refresh settle
         pre_sig = vhp._report_signature(driver)   # grid BEFORE this view's search
@@ -220,7 +239,28 @@ def run_departure(driver, prop, report, download_dir, today=None,
     tomorrow = base + datetime.timedelta(days=1)
     _log(logger, "  room-departure {}: Expected Departure To Date={} (today+tomorrow)"
          .format(prop["code"].upper(), tomorrow.strftime("%d/%m/%y")))
-    exp_rows = _pull("Expected Departure", "exp", to_date=tomorrow)
+    # Retry the Expected-Departure pull once on failure: reload the page and try
+    # again. A memory snap / transient render hiccup then self-heals instead of
+    # leaving the whole departure feed stale. A real (structural) failure still
+    # raises after the 2nd try — with the page-state logs above to explain it.
+    exp_rows, last_exc = None, None
+    for attempt in (1, 2):
+        try:
+            exp_rows = _pull("Expected Departure", "exp", to_date=tomorrow)
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            _log(logger, "    Expected Departure attempt {}/2 failed: {}".format(
+                attempt, vhp._describe(exc)))
+            if attempt < 2:
+                try:
+                    vhp.refresh_page(driver)   # fresh page for the retry
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(3.0)
+    if exp_rows is None:
+        raise last_exc if last_exc is not None else RuntimeError(
+            "Expected Departure pull failed for {}".format(prop["code"]))
     _log(logger, "    {} in-house row(s); depart {}={}, {}={}".format(
         len(exp_rows), t_iso, _rooms(exp_rows, t_iso), m_iso, _rooms(exp_rows, m_iso)))
 

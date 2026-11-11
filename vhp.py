@@ -3078,6 +3078,65 @@ def wait_for_report_stable(driver, timeout=45, min_wait=None, settle=None, basel
     return
 
 
+# A compact snapshot of the telephone-operator (departure) page for the LOG, so a
+# failed BKDU departure pull is diagnosable without watching the office PC: the
+# Display value, any open-menu options, table headers, row count, spinner, crash
+# flag, URL and whether a login form is showing.
+_TELOP_STATE_JS = r"""
+  function txt(e){ return e ? (e.textContent||'').replace(/\s+/g,' ').trim() : ''; }
+  var out = {};
+  try { out.url = location.href; } catch(e){ out.url = ''; }
+  var body = (document.body && document.body.innerText || '');
+  out.crash = /aw,\s*snap|out of memory|err_out_of_memory/i.test(body.slice(0,800));
+  var disp = document.querySelector("[data-cy='dropdown-display']");
+  out.display = disp ? txt(disp).slice(0,60) : '(no dropdown-display)';
+  var ths = document.querySelectorAll('table.q-table th');
+  out.headers = [].map.call(ths, txt).filter(Boolean).slice(0,24);
+  var opts = document.querySelectorAll('.q-menu .q-item__label');
+  out.menu = [].map.call(opts, txt).filter(Boolean).slice(0,24);
+  try { out.rows = document.querySelectorAll('table.q-table tbody tr').length; } catch(e){ out.rows = -1; }
+  var spin = document.querySelectorAll('.q-inner-loading,.q-spinner,.q-loading-bar,.q-loading');
+  out.spinning = [].some.call(spin, function(e){ var r=e.getBoundingClientRect(); return r.width>0 && r.height>0; });
+  var pw = document.querySelector("input[type='password']");
+  out.loginVisible = !!(pw && pw.offsetParent);
+  return JSON.stringify(out);
+"""
+
+
+def telop_page_state(driver):
+    """One-line page-state snapshot for the log (see _TELOP_STATE_JS). Never raises."""
+    try:
+        return driver.execute_script(_TELOP_STATE_JS)
+    except Exception as exc:  # noqa: BLE001
+        return "(page-state read failed: {})".format(_describe(exc))
+
+
+def dump_display_options(driver):
+    """Open the 'Display' dropdown and return its option labels (so a '[display] not
+    active' failure shows what views VHP actually offers for this property). Best-
+    effort: returns a list of strings, or a short note. Leaves the menu closed."""
+    try:
+        fld = _dropdown_field(driver, "Display")
+        if fld is None:
+            return ["(no 'Display' dropdown found)"]
+        _real_click(driver, fld)
+        time.sleep(0.6)
+        labels = [(e.text or e.get_attribute("textContent") or "").strip()
+                  for e in driver.find_elements(By.CSS_SELECTOR, ".q-menu .q-item__label")]
+        labels = [s for s in labels if s]
+        for _ in range(3):
+            try:
+                driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.2)
+            if not any(_disp_safe(m) for m in driver.find_elements(By.CSS_SELECTOR, ".q-menu")):
+                break
+        return labels or ["(Display menu opened but no options read)"]
+    except Exception as exc:  # noqa: BLE001
+        return ["(could not read Display options: {})".format(_describe(exc))]
+
+
 def _visible_menu_items(driver):
     """Return [(element, UPPER_TEXT, raw_text)] for each visible row of an open
     Quasar menu. Prefers rows inside the floating .q-menu, falling back to any
