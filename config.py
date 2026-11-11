@@ -472,6 +472,14 @@ PACING = {
     "park_between_reports": True,  # park the tab on about:blank between reports to
                                    #   FREE the heavy grid's memory before the next
     "park_settle":          2.5,   # settle time after parking on about:blank
+    # --- AFTER SEARCH, BEFORE DOWNLOAD -----------------------------------------
+    # After a filtered SEARCH the old (e.g. GROSS) grid stays on screen until the
+    # filtered XHR re-renders it NET. Exporting too early grabs the stale grid (the
+    # screen then shows the right numbers but the CSV is wrong). These make the
+    # export WAIT until the on-screen data has finished updating.
+    "after_search":         3.0,   # min wait after SEARCH before trusting the grid
+    "data_stable":          3.0,   # require the grid UNCHANGED this long (re-render done)
+    "before_export":        2.5,   # final pause after it settles, before Print -> CSV
 }
 
 

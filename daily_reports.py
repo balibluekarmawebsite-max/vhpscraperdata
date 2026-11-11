@@ -206,11 +206,12 @@ def run_departure(driver, prop, report, download_dir, today=None,
         if not ok:
             raise RuntimeError("[date] could not set {}".format(what))
         time.sleep(2.0)   # let the date-change re-render/auto-refresh settle
+        pre_sig = vhp._report_signature(driver)   # grid BEFORE this view's search
         step("search", lambda: vhp.click_search(driver))
         if step("wait ready", lambda: vhp.wait_for_report_ready(driver)) == "empty":
             return []
         return step("export", lambda: dj.read_csv_rows(vhp.export_and_download(
-            driver, prop, variant["name"], download_dir)))
+            driver, prop, variant["name"], download_dir, baseline=pre_sig)))
 
     def _rooms(rows, d_iso):
         return dj.distinct_rooms_by_date(rows, cols["departure"], cols["room"],

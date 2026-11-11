@@ -3003,6 +3003,81 @@ def wait_for_report_ready(driver, timeout=60, settle=4.0, min_wait=6.0):
     raise TimeoutError("report grid did not settle (no data and no empty-state)")
 
 
+# A cheap signature of the grid's content so we can tell when it STOPS changing
+# after a filtered SEARCH: the cell count + the head and TAIL of all cell text
+# (the summary rows — Room Occupied / Occupancy % — live at the end and are exactly
+# what flips gross<->net). Changes while the filtered re-render is still in flight.
+_REPORT_SIG_JS = r"""
+  var cells = document.querySelectorAll('table.q-table td');
+  var parts = [String(cells.length)];
+  for (var i=0;i<cells.length;i++){ var t=(cells[i].textContent||'').trim(); if(t) parts.push(t); }
+  var s = parts.join('|');
+  return s.length + '#' + s.slice(0,300) + '#' + s.slice(-300);
+"""
+
+
+def _report_signature(driver):
+    try:
+        return driver.execute_script(_REPORT_SIG_JS)
+    except Exception:  # noqa: BLE001 - a read hiccup just looks like 'changed'
+        return None
+
+
+def wait_for_report_stable(driver, timeout=45, min_wait=None, settle=None, baseline=None):
+    """After SEARCH, wait until the grid HAS data AND its content has STOPPED
+    changing for `settle` seconds, so a filtered re-render (e.g. gross -> net) has
+    fully replaced the previous result before we export. This is the fix for the
+    'screen shows 341 but the CSV says 354' bug: wait_for_report_data returns on the
+    stale cells still on screen, so we export too early. Never raises — on timeout it
+    returns and lets the export proceed (data is present, just slow to settle).
+
+    baseline: the grid signature captured JUST BEFORE SEARCH. When given, we first
+    wait for the grid to CHANGE from it — i.e. the filtered search actually took
+    effect — so we never measure stability on the stale pre-search grid and return
+    gross while the net XHR is still in flight. If it never changes within `min_wait`
+    (the filtered result genuinely equals the previous one), we accept and go on.
+
+    min_wait / settle default to config.PACING 'after_search' / 'data_stable'."""
+    min_wait = config.pace("after_search", 3.0) if min_wait is None else min_wait
+    settle = config.pace("data_stable", 3.0) if settle is None else settle
+    start = time.time()
+    end = start + timeout
+    changed = baseline is None   # with no baseline, treat as 'already changed'
+    last_sig, stable_since = None, None
+    while time.time() < end:
+        now = time.time()
+        if _count_cells_with_text(driver) < 3:
+            # Data is normally already present (the caller waited). Don't hang if the
+            # grid is momentarily empty mid-re-render; give up the stability wait
+            # after a short grace and let the export proceed/fail naturally.
+            if now - start >= min_wait + 5:
+                return
+            last_sig, stable_since = None, None
+            time.sleep(0.5)
+            continue
+        sig = _report_signature(driver)
+        if not changed:
+            # Hold until the filtered search has visibly re-rendered the grid.
+            if sig is not None and sig != baseline:
+                changed = True
+            elif now - start >= min_wait:
+                changed = True   # net result == previous one -> nothing to wait for
+            else:
+                last_sig = sig
+                time.sleep(0.5)
+                continue
+        if sig is not None and sig == last_sig:
+            if stable_since is None:
+                stable_since = now
+            if now - start >= min_wait and now - stable_since >= settle:
+                return   # changed, present, AND unchanged long enough -> safe to export
+        else:
+            stable_since = None   # still changing -> reset the calm timer
+        last_sig = sig
+        time.sleep(0.5)
+    return
+
+
 def _visible_menu_items(driver):
     """Return [(element, UPPER_TEXT, raw_text)] for each visible row of an open
     Quasar menu. Prefers rows inside the floating .q-menu, falling back to any
@@ -3259,20 +3334,32 @@ def scrape_report(driver, prop, report, download_dir):
                 raise RuntimeError(
                     "[dropdown] required {!r}={!r} not active — skipping report to "
                     "avoid exporting the wrong view".format(lbl, val))
+    pre_sig = _report_signature(driver)   # grid signature BEFORE the filtered search
     step("click SEARCH", lambda: click_search(driver))
     step("wait for data", lambda: wait_for_report_data(driver))
-    return export_and_download(driver, prop, report["name"], download_dir, step=step)
+    return export_and_download(driver, prop, report["name"], download_dir,
+                               step=step, baseline=pre_sig)
 
 
-def export_and_download(driver, prop, report_name, download_dir, step=None):
+def export_and_download(driver, prop, report_name, download_dir, step=None, baseline=None):
     """Settle the grid, (re)assert the download dir, press Print -> CSV, wait for the
     file, and return its renamed path. Shared by scrape_report and the daily-JSON
     departure flow (which re-exports the same page once per target date). `step`, if
-    given, wraps each sub-step so failures read like '[export Print CSV] ...'."""
+    given, wraps each sub-step so failures read like '[export Print CSV] ...'.
+    `baseline` is the grid signature from BEFORE SEARCH (so we wait for the filtered
+    re-render to land before exporting)."""
     def _run(name, fn):
         return step(name, fn) if step else fn()
 
-    time.sleep(1)  # let the grid settle before exporting
+    # Wait until the grid has STOPPED changing before exporting. After a filtered
+    # SEARCH the previous (e.g. gross) result stays on screen until the filtered XHR
+    # replaces it NET, so exporting too early captured the stale grid (the screen
+    # then showed the right numbers but the CSV was wrong). This + the settle below
+    # make sure the on-screen data is final before Print -> CSV.
+    _run("wait for stable data", lambda: wait_for_report_stable(driver, baseline=baseline))
+    s = config.pace("before_export", 1.0)
+    if s > 0:
+        time.sleep(s)
     # Re-assert the download directory (page navigation can reset it).
     for _cmd in ("Browser.setDownloadBehavior", "Page.setDownloadBehavior"):
         try:
