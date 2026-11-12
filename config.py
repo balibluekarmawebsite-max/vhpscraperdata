@@ -477,10 +477,14 @@ MONTHLY_JSON_REPORTS = [
         },
         # Tick 'Display Room Rate' so the CSV includes the rate column before export.
         "checkboxes": {"Display Room Rate": True},
-        "scopes": ["MTD", "YTD"],  # two date ranges pulled + posted per month
+        # MTD only for now. A single 10-month YTD query is too heavy for VHP / this PC
+        # to load even in 5 min, so we don't scrape it. YTD is better derived on the
+        # dashboard by summing the monthly MTD posts it already receives; if a VHP YTD
+        # CSV is truly needed, pull it in monthly CHUNKS and concatenate (add "YTD"
+        # back here + handle it in run_guests). See the note to the dashboard agent.
+        "scopes": ["MTD"],
         "period_required": True,   # skip a scope whose date range can't be set
-        # A 10-month guest list (YTD) is a big query — give VHP time to return + export
-        # it (seconds). The MTD one is quick; these just stop the YTD timing out at 60s.
+        # Give the (still monthly) guest query room to return + export.
         "search_timeout": 300,
         "download_timeout": 300,
     },
