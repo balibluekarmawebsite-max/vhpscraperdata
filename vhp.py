@@ -3436,18 +3436,24 @@ def scrape_report(driver, prop, report, download_dir):
                     "avoid exporting the wrong view".format(lbl, val))
     pre_sig = _report_signature(driver)   # grid signature BEFORE the filtered search
     step("click SEARCH", lambda: click_search(driver))
-    step("wait for data", lambda: wait_for_report_data(driver))
+    # A heavy report (e.g. a 10-month guest list) can take minutes for VHP to return
+    # its data; a report may raise its own waits via "search_timeout"/"download_timeout".
+    search_to = int(report.get("search_timeout") or 60)
+    step("wait for data", lambda: wait_for_report_data(driver, timeout=search_to))
     return export_and_download(driver, prop, report["name"], download_dir,
-                               step=step, baseline=pre_sig)
+                               step=step, baseline=pre_sig,
+                               download_timeout=report.get("download_timeout"))
 
 
-def export_and_download(driver, prop, report_name, download_dir, step=None, baseline=None):
+def export_and_download(driver, prop, report_name, download_dir, step=None, baseline=None,
+                        download_timeout=None):
     """Settle the grid, (re)assert the download dir, press Print -> CSV, wait for the
     file, and return its renamed path. Shared by scrape_report and the daily-JSON
     departure flow (which re-exports the same page once per target date). `step`, if
     given, wraps each sub-step so failures read like '[export Print CSV] ...'.
     `baseline` is the grid signature from BEFORE SEARCH (so we wait for the filtered
-    re-render to land before exporting)."""
+    re-render to land before exporting). `download_timeout` overrides how long we wait
+    for the file (None -> config.DOWNLOAD_TIMEOUT) — raise it for a large export."""
     def _run(name, fn):
         return step(name, fn) if step else fn()
 
@@ -3470,5 +3476,6 @@ def export_and_download(driver, prop, report_name, download_dir, step=None, base
     since = time.time()                            # mtime floor for the download
     _run("export Print CSV", lambda: export_print_csv(driver))
     raw = _run("wait for download",
-               lambda: wait_for_download(config.DOWNLOAD_WATCH, before=before, since=since))
+               lambda: wait_for_download(config.DOWNLOAD_WATCH, before=before, since=since,
+                                         timeout=download_timeout))
     return rename_download(raw, prop["code"], report_name, download_dir)

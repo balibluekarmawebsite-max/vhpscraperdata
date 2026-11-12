@@ -479,6 +479,10 @@ MONTHLY_JSON_REPORTS = [
         "checkboxes": {"Display Room Rate": True},
         "scopes": ["MTD", "YTD"],  # two date ranges pulled + posted per month
         "period_required": True,   # skip a scope whose date range can't be set
+        # A 10-month guest list (YTD) is a big query — give VHP time to return + export
+        # it (seconds). The MTD one is quick; these just stop the YTD timing out at 60s.
+        "search_timeout": 300,
+        "download_timeout": 300,
     },
 ]
 
