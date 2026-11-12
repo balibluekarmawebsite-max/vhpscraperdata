@@ -104,9 +104,21 @@ def touch_property(logger, prop, report, do_search):
                                "CAPTCHA + LOG IN in its window", prop["code"])
                 return "logged_out"
         elif state == "login" or (state == "unknown" and _on_login_url(driver)):
-            logger.warning("[%s] VHP is on the login page — type the CAPTCHA + LOG IN "
-                           "(left as-is for you; not reloading it)", prop["code"])
-            return "logged_out"
+            # VHP is sitting on the login page (e.g. the session dropped straight to
+            # /login, usually with the username/password remembered). On an unattended
+            # scraper PC we DO want to log back in here, not just wait for a human.
+            # attempt_auto_login still backs off the moment the CAPTCHA box has text
+            # (a human mid-login), so it won't fight a real manual login.
+            if getattr(config, "AUTO_LOGIN_ON_OPEN_LOGIN", True) and \
+                    attempt_auto_login(driver, prop, recovery=True, logger=logger):
+                logger.info("[%s] auto-login succeeded on the open login page — "
+                            "session restored", prop["code"])
+                # fall through to the keep-warm nudge below
+            else:
+                logger.warning("[%s] VHP is on the login page — type the CAPTCHA + "
+                               "LOG IN (left as-is for you; not reloading it)",
+                               prop["code"])
+                return "logged_out"
 
         # Logged in (or just auto-logged-in). Navigate to keep the session warm. If
         # navigating reveals a fresh logout, that IS a recovery we initiated, so try

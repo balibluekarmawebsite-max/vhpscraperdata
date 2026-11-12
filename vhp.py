@@ -578,20 +578,26 @@ def attempt_auto_login(driver, prop, recovery, logger=None):
         _log("CAPTCHA box already has text — a human is logging in; backing off")
         return False
 
-    # Fill username/password only if empty (the browser usually remembers them);
-    # track what WE filled so we can clear it again on failure.
+    # Fill username/password. If we have stored credentials, TYPE them (clearing the
+    # field first) so we overwrite any browser autofill with the known-correct
+    # values — autofill can be stale/partial, and a blind send_keys would APPEND to
+    # it. Without stored credentials, fall back to whatever the browser remembered.
+    # Either way we verify both fields are non-empty before submitting. We track what
+    # WE filled so we can clear it again on failure.
     user_el, pwd_el, submit_el = form
     creds = config.get_credentials(prop["code"])
     filled = []
     try:
-        if user_el is not None and not (user_el.get_attribute("value") or "").strip() and creds:
-            user_el.clear()
-            user_el.send_keys(creds[0])
-            filled.append(user_el)
-        if pwd_el is not None and not (pwd_el.get_attribute("value") or "").strip() and creds:
-            pwd_el.clear()
-            pwd_el.send_keys(creds[1])
-            filled.append(pwd_el)
+        if creds:
+            if user_el is not None:
+                user_el.clear()
+                user_el.send_keys(creds[0])
+                filled.append(user_el)
+            if pwd_el is not None:
+                pwd_el.clear()
+                pwd_el.send_keys(creds[1])
+                filled.append(pwd_el)
+        # else: no stored credentials -> use the browser's remembered values as-is.
     except Exception:  # noqa: BLE001 - keep going; we re-check below
         pass
     try:
@@ -600,10 +606,12 @@ def attempt_auto_login(driver, prop, recovery, logger=None):
     except Exception:  # noqa: BLE001
         have_user = have_pwd = False
     if not have_user or not have_pwd:
-        _log("no username/password available (browser didn't remember them and no "
-             "credentials.py) — handing to a human")
+        _log("username/password not filled (no credentials.py, and the browser "
+             "didn't remember them) — handing to a human")
         _clear_fields(filled)
         return False
+    _log("username/password ready ({})".format(
+        "typed from credentials.py" if creds else "from the browser's saved login"))
 
     # Read the CAPTCHA; if not confident, REFRESH it (new image — no submit, so no
     # failed login) and read again, a few times, so we only ever submit a confident

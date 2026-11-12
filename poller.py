@@ -47,6 +47,10 @@ _LOCK_WAIT = 1500
 _RETRY_STATUS = (429, 500, 502, 503, 504)
 # Log an "alive, queue empty" line at most this often while idle (seconds).
 _HEARTBEAT = 1800
+# Exit (only when idle) after this long so run-poll.bat re-pulls the latest code and
+# restarts us — otherwise a long-running poller keeps executing the code it started
+# with and never picks up pushed fixes. ~4 hours.
+_MAX_UPTIME = 4 * 3600
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +531,7 @@ def poll_loop(logger, cfg, drain=False, once=False):
     scrape requests, which is worse than a logged hiccup."""
     interval = cfg.get("poll_interval", 120)
     last_beat = time.time()
+    start = time.time()
     while True:
         did_job = False
         try:
@@ -542,6 +547,13 @@ def poll_loop(logger, cfg, drain=False, once=False):
             elif time.time() - last_beat >= _HEARTBEAT:
                 logger.info("alive — no jobs queued (polling every %ss)", interval)
                 last_beat = time.time()
+            # Periodically exit WHEN IDLE so run-poll.bat re-pulls the latest code and
+            # restarts us (never mid-job, so a running re-pull is not interrupted).
+            if (not did_job and not drain and not once
+                    and time.time() - start >= _MAX_UPTIME):
+                logger.info("uptime %.1fh reached — exiting so the wrapper re-pulls "
+                            "the latest code and restarts", (time.time() - start) / 3600.0)
+                return
         except Exception as exc:  # noqa: BLE001 - the daemon must never die on one error
             logger.exception("poll cycle error (continuing): %s", exc)
         time.sleep(2 if did_job else interval)

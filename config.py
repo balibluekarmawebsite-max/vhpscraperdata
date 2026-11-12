@@ -655,6 +655,11 @@ def get_credentials(code):
 AUTO_CAPTCHA_ENABLED = True
 AUTO_CAPTCHA_COOLDOWN_SEC = 300     # min seconds between two real submits
 AUTO_CAPTCHA_MAX_FAILURES = 2       # consecutive failed logins -> auto-off
+# Also auto-login when a keep-alive tick FINDS VHP already sitting on the login page
+# (not only when the bot itself bounced there) — for an unattended scraper PC. The
+# auto-login still backs off the instant the CAPTCHA box has text (a human typing),
+# so it won't fight a real manual login. Set False to only wait for a human there.
+AUTO_LOGIN_ON_OPEN_LOGIN = True
 CAPTCHA_MIN_LEN = 4                 # plausible CAPTCHA length range (digits)
 CAPTCHA_MAX_LEN = 8
 CAPTCHA_LEN = 6                     # EXACT expected length (VHP = 6 digits); 0 = use
