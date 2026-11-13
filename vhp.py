@@ -355,14 +355,78 @@ def _on_login_url(driver):
 
 
 def _clear_fields(els):
-    """Best-effort clear of inputs the bot itself typed into (so a failed auto-login
-    doesn't leave stale digits/creds for a human to submit by reflex). Never raises;
-    the page may have navigated out from under the elements."""
+    """Best-effort ROBUST clear of inputs the bot itself typed into (so a failed
+    auto-login doesn't leave stale digits/creds for a human to submit by reflex).
+    Selenium's .clear() is silently ignored by some Vue/Quasar inputs, so also do
+    select-all + delete. Never raises; the page may have navigated out."""
     for el in els or []:
         try:
             el.clear()
+            if (el.get_attribute("value") or ""):
+                el.send_keys(Keys.CONTROL, "a")
+                el.send_keys(Keys.DELETE)
         except Exception:  # noqa: BLE001 - stale / navigated away
             pass
+
+
+def _clear_input(driver, el):
+    """Robustly EMPTY one input — even a browser-AUTOFILLED or Vue/Quasar-bound one
+    where Selenium's .clear() is ignored (which is how the login creds got typed ON
+    TOP of the autofill and concatenated into 'useruser...'). Tries .clear(), then
+    select-all + delete, then a JS value='' with the input/change events Vue listens
+    on, verifying empty after each. Never raises."""
+    def _val():
+        try:
+            return el.get_attribute("value") or ""
+        except Exception:  # noqa: BLE001
+            return ""
+    try:
+        el.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    if not _val():
+        return
+    try:
+        el.send_keys(Keys.CONTROL, "a")
+        el.send_keys(Keys.DELETE)
+    except Exception:  # noqa: BLE001
+        pass
+    if not _val():
+        return
+    try:
+        driver.execute_script(
+            "var e=arguments[0]; e.value='';"
+            "e.dispatchEvent(new Event('input',{bubbles:true}));"
+            "e.dispatchEvent(new Event('change',{bubbles:true}));", el)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _set_login_field(driver, el, want):
+    """Make `el` hold EXACTLY `want` (a username or password), handling browser
+    autofill + Vue inputs so we NEVER append to a stale/autofilled value. If it is
+    already == want (the browser filled the right value), leave it untouched. Returns
+    True only if the field ends up exactly == want."""
+    if el is None:
+        return False
+
+    def _val():
+        try:
+            return el.get_attribute("value") or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    if _val() == want:
+        return True                      # already correct — don't retype (no concat)
+    for _ in range(2):
+        _clear_input(driver, el)
+        try:
+            el.send_keys(want)
+        except Exception:  # noqa: BLE001
+            pass
+        if _val() == want:
+            return True
+    return _val() == want
 
 
 # --- auto-CAPTCHA circuit breaker: per-property state in logs/.captcha_<code>.json
@@ -587,19 +651,25 @@ def attempt_auto_login(driver, prop, recovery, logger=None):
     user_el, pwd_el, submit_el = form
     creds = config.get_credentials(prop["code"])
     filled = []
-    try:
-        if creds:
-            if user_el is not None:
-                user_el.clear()
-                user_el.send_keys(creds[0])
-                filled.append(user_el)
-            if pwd_el is not None:
-                pwd_el.clear()
-                pwd_el.send_keys(creds[1])
-                filled.append(pwd_el)
-        # else: no stored credentials -> use the browser's remembered values as-is.
-    except Exception:  # noqa: BLE001 - keep going; we re-check below
-        pass
+    if creds:
+        # Set each field to EXACTLY our stored value, handling autofill + Vue inputs
+        # so we never type ON TOP of a remembered value and concatenate it (the
+        # 'PutuBK21@bkubudPutuBK21@bkubud...' bug). If it already holds the right
+        # value we leave it; if it can't be set cleanly we DON'T submit.
+        if user_el is not None:
+            if not _set_login_field(driver, user_el, creds[0]):
+                _log("couldn't set the username cleanly (a stale/autofilled value "
+                     "wouldn't clear) — NOT submitting, to avoid a concatenated login")
+                _clear_fields([user_el, pwd_el])
+                return False
+            filled.append(user_el)
+        if pwd_el is not None:
+            if not _set_login_field(driver, pwd_el, creds[1]):
+                _log("couldn't set the password cleanly — NOT submitting")
+                _clear_fields([user_el, pwd_el])
+                return False
+            filled.append(pwd_el)
+    # else: no stored credentials -> use the browser's remembered values as-is.
     try:
         have_user = bool((user_el.get_attribute("value") or "").strip()) if user_el else False
         have_pwd = bool((pwd_el.get_attribute("value") or "").strip()) if pwd_el else False
@@ -651,6 +721,16 @@ def attempt_auto_login(driver, prop, recovery, logger=None):
         _log("could not save breaker state (disk full / logs locked?) — NOT "
              "submitting, to stay un-hammerable")
         _clear_fields(filled)
+        return False
+
+    # Final guard: re-assert the username/password right before submitting, in case
+    # the browser re-autofilled (and re-concatenated) them after we set them. Abort
+    # rather than submit a bad login (which would just burn the breaker + lock risk).
+    if creds and not (_set_login_field(driver, user_el, creds[0])
+                      and _set_login_field(driver, pwd_el, creds[1])):
+        _log("username/password drifted before submit and couldn't be reset — "
+             "NOT submitting")
+        _clear_fields(filled + [cap_in])
         return False
 
     try:
