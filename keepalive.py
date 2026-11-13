@@ -124,12 +124,14 @@ def touch_property(logger, prop, report, do_search):
         # navigating reveals a fresh logout, that IS a recovery we initiated, so try
         # auto-login once; else hand off.
         try:
-            open_report(driver, report)
+            # require_search=False: the home page has no SEARCH button; we only need
+            # to confirm we weren't bounced to /login (an authenticated round-trip).
+            open_report(driver, report, require_search=False)
         except LoginRequired:
             if attempt_auto_login(driver, prop, recovery=True, logger=logger):
                 logger.info("[%s] auto-login succeeded after the nudge", prop["code"])
                 try:
-                    open_report(driver, report)
+                    open_report(driver, report, require_search=False)
                 except LoginRequired:
                     logger.warning("[%s] VHP logged out again — type the CAPTCHA + "
                                    "LOG IN in its window", prop["code"])
@@ -213,7 +215,11 @@ def main(argv):
 
     try:
         kill_stale_chromedrivers()  # clear leftover drivers before attaching
-        report = config.REPORTS[0]  # the forecast report URL = an authenticated page
+        # Touch a LIGHT authenticated page (the VHP home) instead of the heavy
+        # yearly-forecast report, so the every-2-min hard refresh doesn't pile up
+        # browser memory. Falls back to the first report's URL if KEEPALIVE_URL unset.
+        ka_url = getattr(config, "KEEPALIVE_URL", None) or config.REPORTS[0]["url"]
+        report = {"name": "keepalive", "url": ka_url}
         results = {}
         for prop in config.PROPERTIES:
             results[prop["code"]] = touch_property(logger, prop, report, args.search)

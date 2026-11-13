@@ -554,6 +554,12 @@ EXPORT_EXT = "csv"
 # How long to wait (seconds) for a download to finish before giving up.
 DOWNLOAD_TIMEOUT = 120
 
+# Page the keep-alive touches every couple of minutes to keep the VHP session warm.
+# Use the LIGHT home page (not the heavy yearly-forecast report) so the frequent
+# hard-refresh doesn't pile up browser memory. Any authenticated VHP URL works; the
+# keep-alive just confirms it isn't bounced to /login.
+KEEPALIVE_URL = "https://e1-vhp.com/"
+
 # ---------------------------------------------------------------------------
 # PACING / MEMORY RELIEF
 # ---------------------------------------------------------------------------
