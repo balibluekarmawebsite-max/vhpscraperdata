@@ -548,6 +548,18 @@ JOBS = {
 # scheduled run (main.py) never overlap and kill each other's chromedriver.
 RUN_LOCK_PATH = os.path.join(BASE, "vhp-run.lock")
 
+# "A pull/re-pull is in progress" flag. The poller (poller.py) raises this the
+# moment it claims a dashboard job and keeps it fresh until its queue drains; the
+# keep-alive (keepalive.py) checks it FIRST and skips its hard-refresh so it never
+# navigates a VHP window mid-pull. The run lock already stops the two from driving
+# Chrome at the SAME instant, but a BURST of re-pull jobs releases and re-takes the
+# lock between feeds — this flag keeps the refresh fully stood down for the whole
+# burst, and lets it resume the moment the poller goes idle. Freshness-based: a flag
+# older than PULL_ACTIVE_STALE means the poller died without clearing it, so the
+# keep-alive resumes on its own (a dead poller isn't pulling anything).
+PULL_ACTIVE_PATH = os.path.join(BASE, "vhp-pull-active.flag")
+PULL_ACTIVE_STALE = 20 * 60   # seconds a pull flag stays "active" without a refresh
+
 # Export file extension VHP's "Print CSV" produces (used when renaming).
 EXPORT_EXT = "csv"
 

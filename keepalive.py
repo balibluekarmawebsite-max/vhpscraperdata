@@ -26,6 +26,14 @@ Coordination: it takes the same run lock as main.py / poller.py. If a scheduled
 run or an on-demand job is using Chrome right now, keep-alive simply SKIPS this
 tick — that run is already keeping the sessions alive, and we must never drive the
 same window from two places at once.
+
+It also checks the "pull in progress" flag (pullflag.py) BEFORE anything else: the
+poller raises that flag the moment it claims a dashboard re-pull job and holds it
+up until its queue drains, so the keep-alive stands its refresh down for the WHOLE
+burst of re-pull jobs — not just the instant one feed happens to hold the lock —
+and resumes only once there is no pull task left. This is what stops a keep-alive
+tick from navigating a window to the home page in the gap between two back-to-back
+re-pull feeds.
 """
 import argparse
 import logging
@@ -37,6 +45,7 @@ from logging.handlers import RotatingFileHandler
 
 import config
 from browser import ensure_window, kill_stale_chromedrivers
+from pullflag import is_active
 from runlock import RunLock
 from vhp import (LoginRequired, _captcha_reset, _on_login_url, _read_login_state,
                  attempt_auto_login, click_search, dismiss_session_expired,
@@ -205,6 +214,16 @@ def main(argv):
     args = parser.parse_args(argv)
 
     logger = setup_logging()
+
+    # A pull/re-pull is running right now -> stand the home-URL refresh down
+    # entirely and resume on a later tick once the poller's queue is idle. The run
+    # lock below also guards the exact-concurrency case, but a BURST of re-pull jobs
+    # releases the lock between feeds; checking the flag up front stops a keep-alive
+    # tick from slipping into one of those gaps and navigating a window mid-pull.
+    if is_active():
+        logger.info("a pull/re-pull is in progress — skipping keep-alive refresh "
+                    "(will resume once the poller's queue is idle)")
+        return 0
 
     # Don't fight an active scrape for the windows — that run keeps sessions alive.
     lock = RunLock(config.RUN_LOCK_PATH)

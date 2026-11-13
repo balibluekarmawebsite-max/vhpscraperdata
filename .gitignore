@@ -37,3 +37,8 @@ desktop.ini
 
 # collected CAPTCHA training images (local only)
 captcha_samples/
+
+# Runtime coordination files (transient, machine-local): the Chrome run lock and
+# the "pull in progress" flag the poller raises for the keep-alive.
+vhp-run.lock
+vhp-pull-active.flag

@@ -36,6 +36,7 @@ import requests
 import config
 import daily_reports
 from browser import ensure_window, kill_stale_chromedrivers
+from pullflag import clear_flag, raise_flag
 from runlock import RunLock
 from uploader import UploadError, upload
 from vhp import LoginRequired, _parse_iso, ensure_logged_in, scrape_report
@@ -464,6 +465,7 @@ def _process_section_d(logger, cfg, job):
     try:
         kill_stale_chromedrivers()
         lock.refresh()
+        raise_flag()  # keep the "pull in progress" flag fresh so keep-alive stays off
         status, message, written = _repull_section_d(logger, prop, jid, feeds, date)
     finally:
         lock.release()
@@ -515,6 +517,7 @@ def _process_one(logger, cfg, job):
     try:
         kill_stale_chromedrivers()
         lock.refresh()  # keep the lock fresh so a slow scrape isn't judged stale
+        raise_flag()  # keep the "pull in progress" flag fresh so keep-alive stays off
         status, message, result = _scrape_and_upload(logger, report, prop, jid)
     finally:
         lock.release()
@@ -532,31 +535,46 @@ def poll_loop(logger, cfg, drain=False, once=False):
     interval = cfg.get("poll_interval", 120)
     last_beat = time.time()
     start = time.time()
-    while True:
-        did_job = False
-        try:
-            job = claim_job(logger, cfg)
-            if job is not None:
-                did_job = True
-                _process_one(logger, cfg, job)
-                if once:
-                    return
-            elif drain or once:
-                logger.info("no jobs queued — exiting.")
-                return
-            elif time.time() - last_beat >= _HEARTBEAT:
-                logger.info("alive — no jobs queued (polling every %ss)", interval)
-                last_beat = time.time()
-            # Periodically exit WHEN IDLE so run-poll.bat re-pulls the latest code and
-            # restarts us (never mid-job, so a running re-pull is not interrupted).
-            if (not did_job and not drain and not once
-                    and time.time() - start >= _MAX_UPTIME):
-                logger.info("uptime %.1fh reached — exiting so the wrapper re-pulls "
-                            "the latest code and restarts", (time.time() - start) / 3600.0)
-                return
-        except Exception as exc:  # noqa: BLE001 - the daemon must never die on one error
-            logger.exception("poll cycle error (continuing): %s", exc)
-        time.sleep(2 if did_job else interval)
+    try:
+        while True:
+            did_job = False
+            try:
+                job = claim_job(logger, cfg)
+                if job is not None:
+                    # A pull is in progress -> raise the flag so the keep-alive
+                    # stands its home-URL refresh down until the queue drains.
+                    raise_flag()
+                    did_job = True
+                    _process_one(logger, cfg, job)
+                    if once:
+                        return
+                else:
+                    # Queue empty -> no pull in progress: drop the flag so the
+                    # keep-alive resumes its refresh. (This is "continue again
+                    # after there is no task left on the pull queue.")
+                    clear_flag()
+                    if drain or once:
+                        logger.info("no jobs queued — exiting.")
+                        return
+                    if time.time() - last_beat >= _HEARTBEAT:
+                        logger.info("alive — no jobs queued (polling every %ss)", interval)
+                        last_beat = time.time()
+                    # Periodically exit WHEN IDLE so run-poll.bat re-pulls the latest
+                    # code and restarts us (never mid-job, so a running re-pull is not
+                    # interrupted).
+                    if (not drain and not once
+                            and time.time() - start >= _MAX_UPTIME):
+                        logger.info("uptime %.1fh reached — exiting so the wrapper "
+                                    "re-pulls the latest code and restarts",
+                                    (time.time() - start) / 3600.0)
+                        return
+            except Exception as exc:  # noqa: BLE001 - the daemon must never die on one error
+                logger.exception("poll cycle error (continuing): %s", exc)
+            time.sleep(2 if did_job else interval)
+    finally:
+        # Leaving the loop for ANY reason (idle restart, --drain/--once, a fatal
+        # error) -> make sure the flag is down so the keep-alive isn't wedged off.
+        clear_flag()
 
 
 # ---------------------------------------------------------------------------
